@@ -1,0 +1,75 @@
+---
+title: "R Notebook"
+output: github_document
+---
+
+August 2023 - Bogoslof SeaBird Temperature/Pressure casts
+
+Quick look at SeaBird cast data from field collections, August 6-11.
+
+
+```{r load-libraries}
+library(tidyverse)
+```
+## Notes and to-dos
+
+Need to convert pressure to depth
+
+Need to change UTC to AK time to determine dates/times for each sampling event (1-5).
+
+
+Eddy field around Bogoslof - Jeremy could pull down the remote sensing data - additional foraging corresponding to eddies
+
+Monthly composite of chlorophyll for August
+
+Argo float - subsurface current field
+
+Ask PMEL if there is any data for this time period
+
+Climate modelers at UW/PMEL Al Herman and Wei, running the models and running the bias correction.
+
+
+
+### Confirm that I have all the CTD data onboard.
+
+```{r read-in-all-data}
+cumulative_dat <- read_csv("../data/SBE39plus09899_2023-09-12.asc", skip = 11, col_names = F) %>%
+  rename(temperature = X1, pressure = X2, date = X3, time = X4) %>%
+  separate(date, into = c("day", "month", "year")) %>%
+  filter(month != "Jul") # remove test data prior to Bogoslof
+
+cumulative_dat %>%
+  group_by(day, month) %>%
+  tally() 
+```
+
+
+
+```{r}
+cumulative_dat %>%
+ filter(day %in% c(10, 11)) %>%
+  ggplot(aes(x = time, y = pressure)) +
+  geom_point()
+
+
+```
+
+That looks like a pretty consistent signal on pressure/depth.
+
+
+
+```{r plot-casts-example}
+# for one sampling period
+cumulative_dat %>%
+  filter(day %in% c(10, 11)) %>%
+  filter(pressure != 0) %>%
+  filter(temperature < 10) %>%
+  ggplot(aes(x = temperature, y = -1*pressure)) +
+  geom_point() + 
+  labs(x = "temperature C",
+       y = "pressure dbar*-1")
+
+
+```
+
+Convert between UTC and AK time by subtracting 8 hours.
