@@ -1,0 +1,146 @@
+---
+title: "sample-analysis"
+author: "diana baetscher"
+date: "2024-04-30"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+load libraries 
+```{r, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(rstan)
+library(broom)
+library(vegan)
+library(reshape)
+```
+
+
+load ASV table and metadata
+```{r}
+# read in asv table
+asv_table <- read_csv("../data/NFS_MiFish_ASVtable.csv") %>%
+  rename(sample = `...1`) 
+
+# transpose and remove entries for zero reads
+asv_tbl_long <- asv_table %>%
+  pivot_longer(2:length(asv_table), values_to = "reads", names_to = "ASV") %>%
+  filter(reads > 0) 
+
+asv_tbl_long <- asv_tbl_long %>%
+  separate(., sample, into = c("extraction_ID", "replicate", "X"), remove = F)
+
+```
+
+
+```{r}
+# add some metadata to evaluate samples
+meta <- read_csv("../data/eDNA_extraction_database - Sheet1.csv") %>%
+  filter(str_detect(project, "fur seal"))
+
+meta
+```
+
+```{r}
+# add taxonomy
+tax <- read_csv("../data/nfs_mifish_taxonomy.csv") %>%
+  select(-`...1`)
+
+# this is the uncollapsed taxonomy
+# so I'll need to further filter/etc.
+# to get a single assignment
+# and then collapse that down to just a single taxon per ASV
+collapsed_taxonomy <- tax %>%
+  select(qseqid, taxon, taxonomic_level) %>%
+  unique() %>%
+  filter(!taxon %in% c("Canis lupus"),
+         !taxonomic_level %in% c("class", "order"))
+
+collapsed_taxonomy
+```
+
+
+```{r}
+# add metadata to sample/ASV table
+asv_w_meta <- asv_tbl_long %>%
+  left_join(., meta, by = "extraction_ID") #%>%
+  # left_join(., tax_top_ranked, by = c("ASV" = "qseqid")) %>%
+  # filter(!is.na(taxon))
+
+# quick look at controls
+asv_w_meta %>%
+  filter(!is.na(X)) %>%
+  ggplot(aes(x = sample, y = reads, fill = ASV)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+  
+```
+
+```{r}
+# field blanks?
+asv_w_meta %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid")) %>%
+  filter(sample_type == "field_blank",
+         !is.na(taxon)) %>%
+  ggplot(aes(x = sample, y = reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+
+```
+
+That particular ASV didn't pass the blast filtering step... I should look at Kim's decontamination protocol again.
+
+
+```{r}
+# samples
+asv_w_meta %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid")) %>%
+  filter(!is.na(taxon)) %>%
+  group_by(taxon) %>%
+  summarise(total_reads = sum(reads)) %>%
+  arrange(desc(total_reads))
+  
+  filter(sample_type == "sample",
+        # reads > 10,
+         location2 == "west") %>%
+  ggplot(aes(x = sample, y = reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(location2), space = "free", scales = "free") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+
+```
+
+```{r}
+# what about just taking the top taxonomic assignment?
+tax %>%
+  filter(taxonomic_level %in% c("family", "genus")) %>%
+  group_by(qseqid) %>%
+  slice_max(., order_by = seq_percID, n = 2, with_ties = T)
+
+
+```
+
+
+
+```{r}
+tax %>%
+  filter(class == "Mammalia" & species != "Canis lupus") %>%
+  arrange(species) %>%
+  left_join(., asv_w_meta, by = c("qseqid" = "ASV")) %>%
+  select(species) %>%
+  unique()
+```
+

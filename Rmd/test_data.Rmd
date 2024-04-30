@@ -73,3 +73,55 @@ cumulative_dat %>%
 ```
 
 Convert between UTC and AK time by subtracting 8 hours.
+
+## Conversion of pressure to depth
+
+According to the SeaBird Application Note No. 69:
+
+Seawater Applications
+
+Sea-Bird uses the formula in UNESCO Technical Papers in Marine Science No. 44. This is an
+empirical formula that takes compressibility (that is, density) into account. An ocean water column
+at 0 °C (t = 0) and 35 PSU (s = 35) is assumed.
+
+The gravity variation with latitude and pressure is computed as:
+g (m/sec2) = 9.780318 * [ 1.0 + ( 5.2788x10 -3 + 2.36x10 -5 * x) * x ] + 1.092x10 -6 * p
+
+where
+x = [sin (latitude / 57.29578) ] 2
+p = pressure (decibars)
+
+Then, depth is calculated from pressure:
+depth (meters) = [(((-1.82x10 -15 * p + 2.279x10 -10 ) * p - 2.2512x10 -5 ) * p + 9.72659) * p] / g
+where
+p = pressure (decibars)
+g = gravity (m/sec2) 
+
+
+the lat/lon for Bogoslof is:
+53.9280° N, 168.0381° W
+
+```{r formula-to-convert-pressure-to-depth}
+# beginning with just latitude and pressure
+
+depth_conversion <- function(latitude, p) {
+
+    # latitude influence
+    x <- (sin (latitude / 57.29578) )^2
+    
+    # gravity variation wtih latitude and pressure
+    g <- 9.780318 * ( 1.0 + ( 5.2788*10^(-3) + 2.36*10^-5 * x) * x ) + 1.092*10^-6 * p
+    
+    # depth
+    depth_m <- ((((-1.82*10^-15 * p + 2.279*10^-10 ) * p - 2.2512*10^-5 ) * p + 9.72659) * p) / g
+
+    print(depth_m)
+}
+
+```
+
+
+```{r}
+depth_conversion(latitude = 53.9280, p = 75)
+```
+
