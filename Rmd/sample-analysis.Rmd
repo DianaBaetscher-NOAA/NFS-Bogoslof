@@ -106,13 +106,9 @@ That particular ASV didn't pass the blast filtering step... I should look at Kim
 asv_w_meta %>%
   left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid")) %>%
   filter(!is.na(taxon)) %>%
-  group_by(taxon) %>%
-  summarise(total_reads = sum(reads)) %>%
-  arrange(desc(total_reads))
-  
   filter(sample_type == "sample",
         # reads > 10,
-         location2 == "west") %>%
+         location2 == "north") %>%
   ggplot(aes(x = sample, y = reads, fill = taxon)) +
   geom_bar(stat = "identity") +
   facet_grid(cols = vars(location2), space = "free", scales = "free") +
@@ -144,3 +140,190 @@ tax %>%
   unique()
 ```
 
+
+## Testing Kim's decontamination procedure
+
+
+load ASV table and metadata
+load ASV table and metadata
+```{r}
+# read in asv table
+asv_table <- read_csv("../data/NFS_MiFish_ASVtable.csv") %>%
+  rename(sample = `...1`) 
+
+# transpose and remove entries for zero reads
+asv_tbl_long <- asv_table %>%
+  pivot_longer(2:length(asv_table), values_to = "reads", names_to = "ASV") %>%
+  filter(reads > 0) 
+
+asv_tbl_long <- asv_tbl_long %>%
+  separate(., sample, into = c("extraction_ID", "replicate", "X"), remove = F)
+
+  
+```
+
+add column to the ASV table that labels the sample type
+
+```{r}
+# add some metadata to evaluate samples
+asv_table_with_sample_type <- meta %>%
+  dplyr::select(extraction_ID, sample_type, collection_year, project, extraction_date) %>%
+  full_join(asv_tbl_long, by = c("extraction_ID"))
+
+```
+
+### positive controls 
+
+let's start by visualizing the reads in the positive control samples 
+```{r}
+asv_table_with_sample_type %>%
+  filter(str_detect(sample, "PC")) %>%
+  ggplot(aes(x=sample, y=reads, fill=ASV)) +
+  geom_bar(stat = "identity") + 
+    theme_bw() +
+  labs(
+    y = "number of sequencing reads",
+    x = "sample ID",
+    title = "ASV reads in positive controls") + 
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.3, "cm"),
+    legend.position = "none",
+    legend.title = element_blank()
+  )
+```
+I'm a little baffled by the positive controls.
+
+top asvs in positive controls
+```{r}
+asvs_PC <- asv_table_with_sample_type %>%
+  filter(str_detect(sample, "PC")) %>%
+  group_by(ASV) %>%
+  summarise(cum_reads = sum(reads)) %>%
+  arrange(desc(cum_reads))
+  
+```
+
+### pcr blanks 
+
+let me look into the reads that got into the pcr blanks
+```{r}
+asv_table_with_sample_type %>%
+  filter(str_detect(sample, "NC")) %>%
+  ggplot(aes(x=sample, y=reads, fill=ASV)) +
+  geom_bar(stat = "identity") + 
+    theme_bw() +
+  labs(
+    y = "number of sequencing reads",
+    x = "sample ID",
+    title = "ASV reads - pcr negatives") + 
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.3, "cm"),
+    legend.position = "none",
+    legend.title = element_blank()
+  )
+```
+
+### field blanks 
+
+let me look into the reads that got into the pcr blanks
+```{r}
+asv_table_with_sample_type %>%
+  filter(sample_type == "field_blank") %>%
+  ggplot(aes(x=sample, y=reads, fill=ASV)) +
+  geom_bar(stat = "identity") + 
+  facet_grid(project~collection_year, scales = "free_x") + 
+  theme_bw() +
+  labs(
+    y = "number of sequencing reads",
+    x = "sample ID",
+    title = "ASV reads - pcr negatives") + 
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.3, "cm"),
+    legend.position = "none",
+    legend.title = element_blank()
+  )
+```
+
+```{r}
+asvs_FC <- asv_table_with_sample_type %>%
+  filter(sample_type == "field_blank") %>%
+  group_by(ASV, collection_year, project) %>%
+  summarise(total = sum(reads)) %>%
+  arrange(desc(total))
+```
+## 1. Ask Kim about the data for the positive control 
+potentially nothing to do there...
+
+
+## 2. Account for contaminants in positive and negative controls 
+
+next we will remove ASVs that only occur in controls and not in environmental samples. 
+
+let's start by taking a look at what reads remain in these controls 
+```{r}
+asv_table_with_sample_type <- asv_table_with_sample_type %>%
+  mutate(sample_type = ifelse(str_detect(sample, "NC"), "PCR_blank", sample_type)) %>%
+  mutate(sample_type = ifelse(str_detect(sample, "PC"), "positive_control", sample_type))
+
+asv_table_with_sample_type %>%
+  filter(sample_type != "sample") %>%
+  ggplot(aes(x=sample, y=reads, fill=ASV)) +
+  geom_bar(stat = "identity") + 
+  facet_grid(~sample_type, scales = "free_x") + 
+  theme_bw() +
+  labs(
+    y = "number of sequencing reads",
+    x = "sample ID",
+    title = "ASV reads - controls") + 
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.3, "cm"),
+    legend.position = "none",
+    legend.title = element_blank()
+  )
+```
+
+number of reads
+```{r}
+reads_per_type_ASV <- asv_table_with_sample_type %>%
+  group_by(ASV, sample_type) %>%
+  summarize(TotalReadsPerASV = sum(reads)) %>%
+  arrange(ASV)
+```
+
+what ASVs have no reads in samples, but reads in the controls? 
+```{r}
+not_in_samples <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+    filter(sample < 1)
+head(not_in_samples)
+```
+
+
+what ASVs have reads in samples, but more reads in the controls? 
+```{r}
+more_in_pcr_blanks <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+  filter(sample > 1) %>%
+  filter(PCR_blank > sample)
+head(more_in_pcr_blanks)
+
+more_in_pc_blanks <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+  filter(sample > 1) %>%
+  filter(positive_control > sample)
+head(more_in_pc_blanks)
+
+more_in_fb_blanks <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+  filter(sample > 1) %>%
+  filter(field_blank > sample)
+head(more_in_fb_blanks)
+```

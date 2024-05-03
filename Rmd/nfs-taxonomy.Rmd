@@ -21,7 +21,7 @@ library(ggplot2)
 ```
 
 ```{r load-output-from-taxonkit}
-pool_taxonomy <-read.delim("csv_outputs/NFS_MiFish_96perc_shorttaxlineage.txt", header = FALSE, na.strings=c(""," ","NA"))
+pool_taxonomy <-read.delim("csv_outputs/MiFish_96perc_shorttaxlineage.txt", header = FALSE, na.strings=c(""," ","NA"))
 
 head(pool_taxonomy)
 ```
