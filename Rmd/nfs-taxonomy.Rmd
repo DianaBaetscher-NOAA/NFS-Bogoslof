@@ -21,7 +21,7 @@ library(ggplot2)
 ```
 
 ```{r load-output-from-taxonkit}
-pool_taxonomy <-read.delim("csv_outputs/MiFish_96perc_shorttaxlineage.txt", header = FALSE, na.strings=c(""," ","NA"))
+pool_taxonomy <-read.delim("../data/MiFish_96perc_shorttaxlineage.txt", header = FALSE, na.strings=c(""," ","NA"))
 
 head(pool_taxonomy)
 ```
@@ -260,11 +260,13 @@ Taking a closer look at the ASVs that get to family/genus but not species
 uncollapsed_taxonomy %>%
   filter(taxonomic_level %in% c("family", "genus")) %>%
   group_by(qseqid) %>%
-  slice_max(., order_by = seq_percID, n = 2, with_ties = T)
+  slice_max(., order_by = seq_percID, n = 2, with_ties = T) %>%
+  select(qseqid) %>%
+  unique()
 
 ```
 
-110 ASVs that are stuck at the genus/family level.
+84 ASVs that are stuck at the genus/family level.
 The landlocked black kokanee is a good example of where the single best percent ID approach fails. But I can manually filter those...
 Weird that the Atlantic herring is a better match than the pacific herring. 
 
@@ -276,7 +278,8 @@ For now, I'll export the uncollapsed taxonomy:
 uncollapsed_taxonomy %>%
   write.csv("csv_outputs/nfs_mifish_taxonomy.csv")
 
-
+collapsed_taxonomy %>%
+  write.csv("csv_outputs/collapsed_taxonomy.csv")
 ```
 
 ## Add sample information and initial decontamination steps

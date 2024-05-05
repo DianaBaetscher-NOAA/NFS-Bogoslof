@@ -11,12 +11,14 @@ knitr::opts_chunk$set(echo = TRUE)
 
 load libraries 
 ```{r, message=FALSE}
+
 library(tidyverse)
 library(dplyr)
-library(rstan)
+#library(rstan)
 library(broom)
 library(vegan)
 library(reshape)
+
 ```
 
 
@@ -24,7 +26,8 @@ load ASV table and metadata
 ```{r}
 # read in asv table
 asv_table <- read_csv("../data/NFS_MiFish_ASVtable.csv") %>%
-  rename(sample = `...1`) 
+  dplyr::rename(sample = `...1`) # need to call the dplyr function
+
 
 # transpose and remove entries for zero reads
 asv_tbl_long <- asv_table %>%
@@ -47,7 +50,7 @@ meta
 
 ```{r}
 # add taxonomy
-tax <- read_csv("../data/nfs_mifish_taxonomy.csv") %>%
+tax <- read_csv("csv_outputs/nfs_mifish_taxonomy.csv") %>%
   select(-`...1`)
 
 # this is the uncollapsed taxonomy
@@ -149,7 +152,7 @@ load ASV table and metadata
 ```{r}
 # read in asv table
 asv_table <- read_csv("../data/NFS_MiFish_ASVtable.csv") %>%
-  rename(sample = `...1`) 
+  dplyr::rename(sample = `...1`) 
 
 # transpose and remove entries for zero reads
 asv_tbl_long <- asv_table %>%
@@ -168,7 +171,10 @@ add column to the ASV table that labels the sample type
 # add some metadata to evaluate samples
 asv_table_with_sample_type <- meta %>%
   dplyr::select(extraction_ID, sample_type, collection_year, project, extraction_date) %>%
-  full_join(asv_tbl_long, by = c("extraction_ID"))
+  full_join(asv_tbl_long, by = c("extraction_ID")) %>%
+  #filter(str_detect(replicate, "plate")) %>% # fixing the different number of columns for the controls
+  mutate(replicate = ifelse(str_detect(replicate, "plate"), X, replicate)) %>%
+  select(-X) 
 
 ```
 
@@ -189,11 +195,10 @@ asv_table_with_sample_type %>%
     axis.text.x = element_text(angle = 90, hjust = 0.95),
     legend.text = element_text(size = 8),
     legend.key.size = unit(0.3, "cm"),
-    legend.position = "none",
+    #legend.position = "none",
     legend.title = element_blank()
   )
 ```
-I'm a little baffled by the positive controls.
 
 top asvs in positive controls
 ```{r}
@@ -257,8 +262,29 @@ asvs_FC <- asv_table_with_sample_type %>%
   summarise(total = sum(reads)) %>%
   arrange(desc(total))
 ```
-## 1. Ask Kim about the data for the positive control 
-potentially nothing to do there...
+
+
+
+## 1. Estimate index hopping  
+subtract the proportion of reads that jumped into the positive control samples from each environmental sample 
+
+identify the maximum proportion of reads for each ASV found in the positive controls
+```{r}
+prop_asvs_in_positives <- asv_table_with_sample_type %>%
+  filter(extraction_ID == "PC") %>%
+  group_by(sample) %>%
+  mutate(TotalReadsPerSample = sum(reads)) %>%
+  mutate(Prop = reads/TotalReadsPerSample) %>%
+  group_by(ASV) %>%
+  summarise(max_prop = max(Prop)) %>%
+  arrange(desc(max_prop))
+
+prop_asvs_in_positives
+```
+
+Considerations for tag-jumping...
+I will also need to remove all reads belonging to ASV8 (the PC) at some point
+
 
 
 ## 2. Account for contaminants in positive and negative controls 
@@ -302,16 +328,32 @@ what ASVs have no reads in samples, but reads in the controls?
 ```{r}
 not_in_samples <- reads_per_type_ASV %>%
   pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
-    filter(sample < 1)
+    filter(is.na(sample))
+
 head(not_in_samples)
 ```
+There are 17 ASVs exclusively in the field blanks - seems fair game to remove all of those.
+```{r}
+# check taxonomy?
+not_in_samples %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid"))
+```
+All of these would be reasonable things to find...
+Take an look at whether there are a fair number of ASVs for atka mackerel, e.g.
+```{r}
+collapsed_taxonomy %>%
+  filter(taxon == "Pleurogrammus monopterygius")
+
+```
+Wow, 32 ASVs for atka mackerel. Seems wild.
 
 
-what ASVs have reads in samples, but more reads in the controls? 
+
+what ASVs have reads in samples, but more reads in the controls?  
 ```{r}
 more_in_pcr_blanks <- reads_per_type_ASV %>%
   pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
-  filter(sample > 1) %>%
+  filter(sample > 1) %>% 
   filter(PCR_blank > sample)
 head(more_in_pcr_blanks)
 
@@ -326,4 +368,272 @@ more_in_fb_blanks <- reads_per_type_ASV %>%
   filter(sample > 1) %>%
   filter(field_blank > sample)
 head(more_in_fb_blanks)
+```
+
+There's our positive control (ASV8) showing up in the field blank, PC, and sample.
+
+And three ASVs (102, 35, 90) showing up in greater numbers in the field blanks rather than the samples.
+
+```{r peek-at-taxonomy-prior-to-filtering}
+# take a quick look at the identity of those ASVs before removing them
+collapsed_taxonomy %>%
+  filter(qseqid %in% c("ASV102", "ASV35", "ASV90", "ASV8"))
+
+```
+
+okay, want to remove asv8 since it's the pc. 
+what about asvs that are greater in field blanks?   
+ASV102 - Oncorhynchus
+ASV35 - Sebastidae
+ASV90 - Gadidae
+
+relatively low numbers of reads of these asvs in samples, so the conservative approach is to remove them 
+
+
+remove these from the data frame 
+```{r}
+asv_table_filter1 <- asv_table_with_sample_type %>%
+  filter(!ASV %in% not_in_samples$ASV) %>%
+  filter(!ASV %in% more_in_pc_blanks$ASV) %>%
+  filter(!ASV %in% more_in_fb_blanks$ASV)
+```
+
+
+how much does this change things in the controls?
+```{r plot-controls-without-filtered-ASVs}
+asv_table_filter1 %>%
+  filter(sample_type != "sample") %>%
+  ggplot(aes(x=sample, y=reads, fill=ASV)) +
+  geom_bar(stat = "identity") + 
+  facet_grid(~sample_type, scales = "free") + 
+  theme_bw() +
+  labs(
+    y = "number of sequencing reads",
+    x = "sample ID",
+    title = "ASV reads - controls") + 
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.3, "cm"),
+    legend.position = "none",
+    legend.title = element_blank()
+  )
+
+```
+
+```{r}
+asv_table_filter1 %>%
+  filter(sample_type %in% c("sample", "field_blank") &
+           reads >10000) %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid")) %>%
+  filter(ASV == "ASV3")
+
+```
+No taxonomic info that goes along with ASV3. But it is found in very large read numbers in both the field blanks and a couple of samples.
+
+## Is it appropriate to subtract reads from samples?
+This step is set up to subtract the maximum number of reads from ASVs found in the extraction and pcr negative controls from all samples.
+
+calculate the maximum number of reads in an ASV to still show up in an extraction or PCR negative control 
+```{r}
+reads_to_remove_per_ASV <- asv_table_filter1 %>%
+  filter(sample_type == "extraction_blank"| sample_type == "PCR_blank") %>%
+  group_by(ASV) %>%
+  summarize(max_reads = max(reads)) %>%
+  arrange(desc(max_reads))
+
+reads_to_remove_per_ASV %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid"))
+
+## does it make sense to remove these reads from samples?
+
+asv_table_filter1 %>% 
+  filter(sample_type == "sample") %>%
+  inner_join(., reads_to_remove_per_ASV, by = "ASV") %>%
+  filter(max_reads > reads)
+# these are the entries that would be lost with this approach.
+
+
+# for asv2 (herring), subtracting reads would eliminate the asv from SBS 2022 samples, and just reduce reads in NBS 2021 and NBS 2022 samples
+# for asv9 (pink salmon), subtracting reads would eliminate the asv from nearly all samples 
+
+reads_to_remove_per_sample <- asv_table_filter1 %>%
+  left_join(reads_to_remove_per_ASV, by = "ASV") %>%
+  mutate(read_minus_contamination = reads - max_reads) %>%
+  mutate(read_minus_contamination = if_else(read_minus_contamination < 0, 0, read_minus_contamination))
+```
+I don't love removing these because they are likely true observations.
+
+
+Moving on without altering sample read numbers based on controls for now...
+
+## 3. Discard PCR replicates with low numbers of reads 
+
+calculate reads per sample
+```{r}
+all_reads <- asv_table_filter1 %>%
+  group_by(sample) %>%
+  summarize(ReadsPerSample = sum(reads))
+```
+
+visualize 
+```{r}
+all_reads$x_reordered <- reorder(all_reads$sample, -all_reads$ReadsPerSample)
+
+all_reads %>%
+  ggplot(aes(x = x_reordered, y = ReadsPerSample)) + 
+  geom_bar(stat = "identity")
+```
+```{r}
+# which samples are retained?
+all_reads %>%
+  filter(ReadsPerSample > 1000) %>%
+  ggplot(aes(x = x_reordered, y = ReadsPerSample)) + 
+  geom_bar(stat = "identity") +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+
+```
+The number of reads for a given sample are kind of all over the place.
+
+
+fit a normal distribution
+```{r}
+fit <- MASS::fitdistr(all_reads$ReadsPerSample, "normal")
+
+all_reads %>%  
+  mutate(prob = pnorm(all_reads$ReadsPerSample, fit$estimate[[1]], fit$estimate[[2]])) -> all_reads
+```
+
+identify and remove the outliers
+```{r}
+low_dist_probability_cutoff <- 0.05
+minimum_read_cutoff <- 1000
+
+outliers <- all_reads %>% 
+  filter(prob < low_dist_probability_cutoff | ReadsPerSample < minimum_read_cutoff)
+  #filter(ReadsPerSample < minimum_read_cutoff)
+  #filter(prob < low_dist_probability_cutoff)
+
+outlierIDs <- outliers$sample
+```
+
+which samples are removed because of the 1000 reads threshold??
+```{r}
+replicates_removed <- asv_table_filter1 %>%
+  filter(sample %in% outlierIDs) %>%
+  pivot_wider(names_from = "ASV", values_from = "reads")
+
+```
+
+number of pcr replicates removed
+```{r}
+nrow(replicates_removed)
+```
+
+## Taking a pause in Kim's decontamination protocol to explore the idiosycracies of this dataset.
+
+Why are there so many replicates with very low read depth?
+Take a look at by sample variation.
+```{r exploring-variation-across-sample-replicates}
+asv_table_with_sample_type %>%
+  group_by(extraction_ID) %>%
+  ggplot(aes(x = extraction_ID, y = reads, color = replicate)) +
+  geom_point() +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+
+
+```
+Seems like more of the samples from replicate 3 got very little data?
+Do we think that the extracts are very low concentration, or that there's more variation on the lab side of things?
+
+```{r}
+# what about some averages by replicate plate?
+asv_table_with_sample_type %>%
+  group_by(replicate) %>%
+  summarise(mean = mean(reads))
+
+```
+So at the most basic level, replicate 3 received fewer reads than reps 1 and 2 (which might match up with Jamie's worries about the different normalization standards).
+
+But even the first and second reps have ~600 reads different on average.
+
+Reads is one metric, but what about composition?
+
+```{r ASV-composition-across-replicates?}
+asv_table_with_sample_type %>%
+  ggplot(aes(x = extraction_ID, y = reads, fill = ASV)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(replicate), scales = "free_y") +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 90)
+  ) 
+
+ggsave("pdf_outputs/sampleQC_by_replicate_reads_w_ASV.png", width = 12, height = 5)
+
+```
+
+What if I look at it by proportions rather than just reads? Does that make it appear better or worse?
+
+```{r}
+asv_table_with_sample_type %>%
+  group_by(extraction_ID, replicate) %>%
+  mutate(total_reads = sum(reads), 
+         prop_reads = reads/total_reads) %>%
+  ggplot(aes(x = extraction_ID, y = prop_reads, fill = ASV)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(replicate), scales = "free_y") +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 90)
+  ) 
+  
+
+ggsave("pdf_outputs/sampleQC_by_replicate_w_ASV.png", width = 12, height = 5)
+```
+
+Let's make the same plot, but excluding ASVs without taxonomy??
+
+```{r ASVs-with-taxonomy-by-replicate}
+asv_table_with_sample_type %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid")) %>%
+  group_by(extraction_ID, replicate) %>%
+  mutate(total_reads = sum(reads), 
+         prop_reads = reads/total_reads) %>%
+  ggplot(aes(x = extraction_ID, y = prop_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(replicate), scales = "free_y") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, size = 8)
+  ) 
+
+ggsave("pdf_outputs/sampleQC_by_replicate_w_taxonomy.png", width = 12, height = 8)
+```
+
+
+A lot of the reads are going to ASVs that don't have any taxonomic assignment.
+
+```{r ASVs-with-taxonomy-by-replicate-filtered}
+asv_table_with_sample_type %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid")) %>%
+  filter(reads > 1000) %>%
+  group_by(extraction_ID, replicate) %>%
+  mutate(total_reads = sum(reads), 
+         prop_reads = reads/total_reads) %>%
+  ggplot(aes(x = extraction_ID, y = prop_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(replicate), scales = "free_y") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, size = 8)
+  ) 
+
+ggsave("pdf_outputs/sampleQC_by_replicate_w_taxonomy_1000read_min.png", width = 12, height = 8)
 ```
