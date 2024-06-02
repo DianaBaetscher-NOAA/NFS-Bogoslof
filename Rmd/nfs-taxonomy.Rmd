@@ -31,11 +31,11 @@ head(pool_taxonomy)
 ```{r}
 # use the full taxonomy rather than the seq id to collapse identical entries
 pool_tax_df <- pool_taxonomy %>%
-  filter(V4 > 100) %>% # make sure all retained matches are >100 bp
+  filter(V4 > 150) %>% # make sure all retained matches are >100 bp
   select(-V2, -V5, -V6, -V7, -V14, -V8, -V9, -V10, -V11, -V12, -V15, -V16) %>%  #remove unnecessary columns
   group_by(V1, V17) %>% # group by the sequence key and the full taxonomy to reduce duplicate entries
   unique() %>% # doing that reduced the number of entries from 146k to 17k
-  rename(qseqid=V1, perc_id=V3, length=V4, sscinames=V13, taxonomy=V17) %>% #rename headers
+  dplyr::rename(qseqid=V1, perc_id=V3, length=V4, sscinames=V13, taxonomy=V17) %>% #rename headers
   filter(!str_detect(sscinames, "environmental")) %>% # filter out any environmental samples
   filter(!str_detect(sscinames, "synthetic")) #%>% # filter out any synthetic "samples"
   #filter(perc_id >= 98) # seems like some of the matches below 98% are dubious (jellyfish and herring <1% different??)
@@ -56,6 +56,15 @@ pool_tax_df %>%
 taxon_df <- pool_tax_df %>%
   filter(str_detect(taxonomy, ";")) %>%
   separate(taxonomy, into=c("kingdom", "phylum", "class", "order", "family", "genus", "species"), sep = ";")
+
+```
+
+
+```{r}
+# which ASVs for Canis lupus and Homo sapiens?
+taxon_df %>%
+  filter(sscinames %in% c("Homo sapiens", "Canis lupus")) %>%
+  write_csv("csv_outputs/human_dog_asvs.csv")
 
 ```
 

@@ -1,0 +1,322 @@
+---
+title: "plate30-no-normalization"
+author: "diana baetscher"
+date: "2024-05-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Test re-do of plate 30 (all three replicates on one plate) with no normalization.
+
+This goal was also to get more sequencing reads given that ~50% go to off-target bacteria.
+
+load libraries 
+```{r, message=FALSE}
+library(tidyverse)
+library(dplyr)
+#library(rstan)
+library(broom)
+library(vegan)
+library(reshape)
+
+```
+
+
+load ASV table and metadata
+```{r load-asv-table}
+# read in asv table
+asv_table <- read_csv("../data/plate30_MiFish_ASVtable.csv") %>%
+  dplyr::rename(sample = `...1`) # need to call the dplyr function
+
+
+# transpose and remove entries for zero reads
+asv_tbl_long <- asv_table %>%
+  pivot_longer(2:length(asv_table), values_to = "reads", names_to = "ASV") %>%
+  filter(reads > 0) 
+
+asv_tbl_long <- asv_tbl_long %>%
+  separate(., sample, into = c("extraction_ID", "replicate", "X"), remove = F)
+
+```
+
+BC are PCR controls from the barcoding step...
+Kind of interesting.
+
+
+```{r check-controls}
+# What's in the BC controls?
+asv_tbl_long %>%
+  filter(extraction_ID == "BC") %>%
+  group_by(sample) %>%
+  ggplot(aes(x = sample, y = reads, fill = ASV)) +
+  geom_bar(stat = "identity")
+
+
+```
+
+```{r}
+asv_tbl_long %>%
+  filter(extraction_ID == "PC") %>%
+  group_by(sample) %>%
+  ggplot(aes(x = sample, y = reads, fill = ASV)) +
+  geom_bar(stat = "identity")
+
+
+
+```
+Those look great. Really consistent.
+
+```{r}
+asv_tbl_long %>%
+  filter(extraction_ID == "NC") %>%
+  group_by(sample) %>%
+  ggplot(aes(x = sample, y = reads, fill = ASV)) +
+  geom_bar(stat = "identity")
+
+
+
+```
+More variation across the negatives, which is what we would expect to see.
+
+No red flags, moving on.
+
+
+```{r metadata}
+# add some metadata to evaluate samples
+meta <- read_csv("../data/eDNA_extraction_database - Sheet1.csv") %>%
+  filter(str_detect(project, "fur seal"))
+
+# combine ASV table with metadata
+asv_tbl_meta <- asv_tbl_long %>%
+  left_join(., meta, by = "extraction_ID")
+
+head(asv_tbl_meta)
+```
+
+```{r}
+# add taxonomy
+tax <- read_csv("../data/plate30_mifish_taxonomy.csv") %>%
+  select(-`...1`)
+
+# this is the uncollapsed taxonomy
+# so I'll need to further filter/etc.
+# to get a single assignment
+# and then collapse that down to just a single taxon per ASV
+collapsed_taxonomy <- tax %>%
+  select(qseqid, taxon, taxonomic_level) %>%
+  unique() %>%
+  filter(!taxon %in% c("Canis lupus"),
+         !taxonomic_level %in% c("class", "order"))
+
+collapsed_taxonomy
+
+# add that to the asv table with metadata
+merged_df <- asv_tbl_meta %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid"))
+  
+
+# quick plot
+merged_df %>%
+  filter(!is.na(taxon) &
+           sample != "Undetermined") %>%
+  ggplot(aes(x = sample, y = reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~extraction_ID, scales = "free") +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+
+ggsave("pdf_outputs/plate30_no_norm_quickplot.pdf", height = 11, width = 10)
+
+merged_df %>%
+  filter(!is.na(taxon) &
+           sample != "Undetermined" &
+           !is.na(location2)) %>%
+    group_by(location2, location3, taxon) %>%
+    mutate(reads_by_site = sum(reads)) %>%
+    select(reads_by_site, location2, location3, taxon) %>%
+    unique() %>%
+  #mutate(location2 = ifelse(is.na(location2), "beadControl", location2)) %>%
+    mutate(location3 = ifelse(is.na(location3), "fieldBlank", location3)) %>%
+    unite(location2, location3, col = "site") %>%
+    ggplot(aes(x = site, y = reads_by_site, fill = taxon)) +
+    geom_bar(stat = "identity") +
+    #facet_wrap(~site, scales = "free") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5)
+    ) +
+    labs(
+      title = "Reads summed across field/lab replicates by site \n no normalization"
+    )
+  
+#ggsave("pdf_outputs/plate30_normalized_quickplot.pdf", height = 11, width = 10)
+ggsave("pdf_outputs/plate30_no_norm_site.pdf", height = 5, width = 8)
+```
+
+
+### Comparing normalized and non-normalized data
+
+Easiest approach for comparison would be to look at presence/absence data across both datasets at once.
+This won't run independently as currently coded - just taking a quick look before deciding on next steps for plate 29.
+
+```{r}
+# data frames for the non-normalized and normalized sequencing data
+no_norm_df <- merged_df 
+
+plate30_norm <- read_csv("csv_outputs/plate30_norm_df.csv")
+
+plate30_norm_collapsed <- plate30_norm %>%
+ group_by(location2, location3, taxon) %>%
+  mutate(reads_by_site = sum(reads)) %>%
+  select(reads_by_site, location2, location3, taxon) %>%
+  unique() %>%
+  mutate(location3 = ifelse(is.na(location3), "fieldBlank", location3)) %>%
+  unite(location2, location3, col = "site") %>%
+  mutate(run = "norm") %>% 
+  mutate(detect = ifelse(!is.na(reads_by_site), 1, 0))
+
+```
+
+```{r summing-across-all-reps-per-niskin}
+no_norm_collapsed <- no_norm_df %>%
+  filter(!is.na(taxon) &
+           sample != "Undetermined" &
+           !is.na(location2)) %>%
+    group_by(location2, location3, taxon) %>%
+    mutate(reads_by_site = sum(reads)) %>%
+    select(reads_by_site, location2, location3, taxon) %>%
+    unique() %>%
+  #mutate(location2 = ifelse(is.na(location2), "beadControl", location2)) %>%
+    mutate(location3 = ifelse(is.na(location3), "fieldBlank", location3)) %>%
+    unite(location2, location3, col = "site") %>%
+    mutate(run = "noNorm") %>%
+  mutate(detect = ifelse(!is.na(reads_by_site), 1, 0))
+
+no_norm_collapsed %>%
+  full_join(., plate30_norm_collapsed) %>%
+  ggplot(aes(x = site, y = reads_by_site, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(run)) +
+   theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5)
+    ) +
+    labs(
+      title = "Reads summed across field/lab replicates by site"
+    )
+
+```
+
+```{r}
+# Not surprising that the read counts would be different
+# but what about just looking at detections
+no_norm_collapsed %>%
+  anti_join(., plate30_norm_collapsed, by = c("site", "taxon")) %>%
+  select(-reads_by_site) %>%
+  ggplot(aes(x = site, y = detect, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(run)) +
+   theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5)
+    ) +
+    labs(
+      title = "Detections across field/lab replicates by site",
+      y = "detections"
+    )
+
+```
+
+```{r}
+no_norm_collapsed %>%
+  full_join(., plate30_norm_collapsed) %>%
+  select(-reads_by_site) %>%
+  filter(site!= "east_csv_outputs") %>% # go back and fix where this was created
+  ggplot(aes(x = taxon, y = detect, fill = site)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(run)) +
+   theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5)
+    ) +
+    labs(
+      title = "Detections across field/lab replicates by site",
+      y = "detections"
+    )
+```
+
+```{r}
+# revise this plot to use geom_tile
+# could also do a geom_tile plot using the read depths
+no_norm_collapsed %>%
+  full_join(., plate30_norm_collapsed) %>%
+  select(-reads_by_site) %>%
+  filter(site!= "east_csv_outputs") %>% # go back and fix where this was created
+  ggplot(aes(x = taxon, y = site)) +
+  geom_tile(aes(fill = detect)) +
+  facet_grid(rows = vars(run)) +
+   theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5)
+    ) +
+    labs(
+      title = "Detections across field/lab replicates by site (any level)"
+    )
+
+```
+
+```{r}
+# no threshold for read counts
+no_norm_collapsed %>%
+  full_join(., plate30_norm_collapsed) %>%
+    filter(site!= "east_csv_outputs") %>% # go back and fix where this was created
+  mutate(run = ifelse(run == "noNorm", "not normalized", "normalized")) %>%
+  ggplot(aes(x = reorder(taxon, -reads_by_site), y = site)) +
+  geom_tile(aes(fill = reads_by_site)) +
+  facet_grid(rows = vars(run)) +
+   theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5),
+      axis.title.x = element_text(margin = margin(t = 5)),
+      axis.title.y = element_text(margin = margin(r = 5))
+    ) +
+    labs(
+      title = "Bogoslof: plate 30\n Reads summed across 3 L of water; 9 PCR replicates",
+      x = "Taxon",
+      y = "Site"
+    ) 
+
+ggsave("pdf_outputs/NFS_plate30_comparison.pdf", width = 8, height = 6)
+```
+
+
+```{r}
+# no threshold for read counts
+no_norm_collapsed %>%
+  full_join(., plate30_norm_collapsed) %>%
+    filter(site!= "east_csv_outputs" &
+             reads_by_site) %>% # go back and fix where this was created
+  mutate(run = ifelse(run == "noNorm", "not normalized", "normalized")) %>%
+  ggplot(aes(x = reorder(taxon, -reads_by_site), y = site)) +
+  geom_tile(aes(fill = log10(reads_by_site))) +
+  facet_grid(rows = vars(run)) +
+   theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5),
+      axis.title.x = element_text(margin = margin(t = 5)),
+      axis.title.y = element_text(margin = margin(r = 5))
+    ) +
+    labs(
+      title = "Bogoslof: plate 30\n Reads summed across 3 L of water; 9 PCR replicates",
+      x = "Taxon",
+      y = "Site",
+      fill = "log10(reads)"
+    ) 
+
+ggsave("pdf_outputs/NFS_plate30_comparison_log10.pdf", width = 8, height = 6)
+```
+
