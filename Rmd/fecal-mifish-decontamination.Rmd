@@ -1,0 +1,457 @@
+---
+title: "fecal-mifish-decontamination"
+author: "diana baetscher"
+date: "2024-10-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Borrowing from Kim's Bering Sea data decon procedure...
+
+
+```{r load-libraries}
+library(tidyverse)
+
+```
+
+
+```{r load-sample-info}
+sample_metadata <- readxl::read_xlsx("../data/NFS_metadata_20241001.xlsx")
+
+#illumina output changed "_" to "-"
+# sample_metadata$sample_ID <- gsub("_", "-", sample_metadata$sample_ID) 
+# sample_metadata$sample_ID_date <- gsub("_", "-", sample_metadata$sample_ID_date) 
+```
+
+check sequence table outputs
+```{r}
+asv_table <- read.csv("csv_outputs/NFSfecal_MiFish_ASVtable.csv") %>%
+  rename(sample = X)
+
+# reformat
+sample_df <- asv_table %>%
+  pivot_longer(2:length(asv_table), names_to = "ASV", values_to = "reads") %>%
+  filter(reads > 0) %>%
+  separate(sample, into = c("ablg", "plate", "replicate"), remove = F)
+
+head(sample_df)
+```
+
+
+# account for likely contaminants 
+
+- tag-jumping
+- negative PCR controls
+- field negatives
+
+
+## Step 1. Account for tag-jumping by using the positive controls 
+
+subtract the proportion of reads that jumped into the positive control samples from each environmental sample 
+
+```{r tag-jumping-by-ASVs-in-PC}
+# on a per-plate basis, what % of each ASV should be subtracted from the samples?
+asv_prop_df <- sample_df %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(reads)) %>%
+  mutate(asv_prop = reads/total_reads)
+  
+asv_prop_df %>%
+  filter(ablg == "PC") %>%
+  ggplot(aes(x = sample, y = asv_prop, fill = ASV)) +
+  geom_bar(stat = "identity") +
+  facet_grid(row = vars(replicate)) +
+  theme_minimal()
+
+```
+```{r which-asv-proportions-to-remove}
+# based on asvs in the PC
+asv_prop_to_remove <- asv_prop_df %>%
+  filter(ablg == "PC") %>%
+  ungroup() %>%
+  select(plate, ASV, asv_prop) %>%
+  rename(prop_to_subtract = asv_prop)
+
+```
+
+
+```{r remove-asvs-props-from-PC-in-samples}
+pc_filtered_sample_df <- asv_prop_df %>%
+  left_join(., asv_prop_to_remove) %>%
+  mutate(new_asv_prop = ifelse(!is.na(prop_to_subtract), asv_prop-prop_to_subtract, asv_prop)) %>%
+  mutate(new_asv_prop = ifelse(new_asv_prop < 0, 0, new_asv_prop)) %>% # remove negative numbers
+  #filter(new_asv_prop > 0) %>%
+  mutate(reads_removed = prop_to_subtract*total_reads) %>%
+  select(-prop_to_subtract, -asv_prop)
+
+pc_filtered_sample_df
+```
+
+Reads removed by tag-jumping:
+```{r summarize-reads-removed}
+pc_filtered_sample_df %>%
+  filter(!is.na(reads_removed))
+```
+
+
+
+
+
+this is a summary of the number of reads removed by ASV and sample_ID
+```{r summarize}
+decontaminated_1 <- pc_filtered_sample_df %>%
+  dplyr::select(sample, ASV, reads_removed) %>%
+  filter(!is.na(replicate) &
+           !is.na(reads_removed)) %>%
+  group_by(ASV) %>%
+  summarise(mean_reads = mean(reads_removed),
+            reads_q.05 = quantile(reads_removed, probs=0.05),
+            median_q.5 = median(reads_removed),
+            reads_q.95 = quantile(reads_removed, probs=0.95)) %>%
+  filter(mean_reads > 0) %>%
+  filter(ASV != "ASV16") # remove sturgeon
+
+decontaminated_1  
+
+```
+
+
+## Step 2. Account for contaminants in positive and negative controls 
+
+next we will remove ASVs that only occur in controls and not in environmental samples. 
+
+number of reads
+```{r}
+reads_per_type_ASV <- pc_filtered_sample_df %>%
+  left_join(., sample_metadata, by = c("ablg" = "extraction_ID")) %>% 
+  mutate(sample_type = ifelse(is.na(sample_type) & ablg == "NC", "pcr_blank", sample_type)) %>%
+  mutate(sample_type = ifelse(is.na(sample_type) & ablg == "PC", "positive_control", sample_type)) %>%
+  group_by(ASV, sample_type) %>%
+  summarize(TotalReadsPerASV = sum(reads, na.rm = TRUE)) %>%
+  arrange(ASV)
+
+```
+
+what ASVs have no reads in samples, but reads in the controls? 
+```{r}
+not_in_samples <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+  filter(is.na(sample)) %>% # here, Kim had a numeric, but mine are NA
+  replace(is.na(.), 0)
+
+not_in_samples
+```
+
+
+what ASVs do have reads in samples, but more reads in the controls? 
+```{r}
+more_in_pcr_blanks <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+  filter(sample > 1) %>%
+  filter(pcr_blank > sample)
+head(more_in_pcr_blanks)
+
+more_in_extraction_blanks <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+  filter(sample > 1) %>%
+  filter(extraction_blank > sample)
+head(more_in_extraction_blanks)
+
+more_in_pc_blanks <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+  filter(sample > 1) %>%
+  filter(positive_control > sample)
+head(more_in_pc_blanks)
+
+more_in_fb_blanks <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "sample_type", values_from = c("TotalReadsPerASV")) %>%
+  filter(sample > 1) %>%
+  filter(field_blank > sample)
+head(more_in_fb_blanks)
+```
+
+remove these from the asv table
+```{r}
+asv_table_filter2 <- pc_filtered_sample_df %>%
+  filter(!ASV %in% not_in_samples$ASV) %>%
+  select(-reads_removed, -total_reads, -new_asv_prop)
+ # filter(!ASV %in% more_in_pcr_blanks$ASV) %>%
+  #filter(!ASV %in% more_in_extraction_blanks$ASV) %>%
+  #filter(!ASV %in% more_in_fb_blanks$ASV)
+
+# Let's stick with ASVs that are just in the controls for filtering
+```
+
+
+## Step 3. Remove ASVs without taxonomic ID 
+
+now lets see how many of these ASVs have taxonomic IDs (these are not final tax ids)
+```{r output-from-blastn-and-taxonkit}
+taxonomy <- read_csv("csv_outputs/fecal_mifish_collapsed_taxonomy.csv")
+
+combined_df <- asv_table_filter2 %>%
+  left_join(., taxonomy) 
+```
+
+
+
+```{r merge-data-frames-remove-NAs}
+combined_df %>%
+  filter(is.na(taxon)) %>%
+  ungroup() %>%
+  select(ASV) %>%
+  unique()
+```
+167 ASVs without taxonomy (removed).
+
+Some of those are selectively removed because they're off-target (i.e., primates, bacteria, etc.)
+
+```{r remove-ASVs-without-taxonomy}
+combined_df_noNA <- combined_df %>%
+  filter(!is.na(taxon)) 
+
+combined_df_noNA %>%
+  group_by(taxon) %>%
+  summarise(sum(reads))
+
+```
+
+## CHECK IN WITH KIM ABOUT SALMON/GADIDS SEQUENCES ##
+
+
+```{r filter-controls-analyze-samples}
+
+clean_df_filtered <- combined_df_noNA %>%
+  left_join(., sample_metadata, by = c("ablg" = "extraction_ID")) %>%
+  filter(sample_type == "sample") %>%
+  filter(!taxon %in% c("Acipenser fulvescens", "Acipenser", "Callorhinus ursinus", "Eumetopias jubatus")) %>%
+  group_by(sample, taxon) %>%
+  mutate(taxon_reads = sum(reads)) %>%
+  select(-ASV, -reads) %>%
+  unique() %>%
+  ungroup() %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(taxon_reads)) %>%
+  select(sample, ablg, plate, replicate, taxon_reads, taxon, total_reads, everything()) %>%
+  mutate(prop_taxon = taxon_reads/total_reads)
+  
+
+clean_df_filtered %>%
+  ggplot(aes(x = ablg, y = prop_taxon, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(replicate), rows = vars(plate)) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 90)
+  ) 
+
+```
+
+
+
+### read in data from hard parts
+(from Katie Luxa and Tonya Zeppelin at MML)
+
+
+```{r hard-parts-data}
+hardparts <- readxl::read_xlsx("../data/2023 NFS Bogoslof hard parts.xlsx")
+
+# just keep the fishes 
+# i.e., remove squids
+hardparts_df <- hardparts %>%
+  # select(ScientificName) %>%
+  # unique() %>%
+  filter(!ScientificName %in% c("Gonatidae", "Gonatopsis borealis/Berryteuthis magister", "Gonatus sp.", "NO PREY REMAINS", "Decapodiformes")) %>%
+  rename(hardparts = ScientificName) %>%
+  mutate(hardparts = ifelse(hardparts == "Northern lampfish", "Stenobrachius leucopsaurus", hardparts))
+
+```
+9 species of fishes.
+
+
+```{r}
+clean_df_filtered %>%
+  #left_join(., hardparts_df, by = c("alternative_ID" = "DNASample")) %>%
+  anti_join(., hardparts_df, by = c("alternative_ID" = "DNASample")) %>%
+  filter(source != "fecal loop") %>%
+  select(alternative_ID) %>%
+  unique()
+  
+  
+  filter(!is.na(hardparts)) %>%
+  ggplot(aes(x = alternative_ID, y = prop_taxon, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(replicate), rows = vars(plate)) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 90)
+  ) 
+
+```
+From the hard parts, apparently we're just getting detections (y/n) for each of the species?
+
+```{r}
+hardparts_df %>%
+  ggplot(aes(x = hardparts, fill = hardparts)) +
+  geom_bar(stat = "count") +
+  #facet_grid(cols = vars(replicate), rows = vars(plate)) +
+  theme_minimal() +
+  theme(
+    #legend.position = "none",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  ) 
+  
+```
+Could we do presence/absence linear regression, hardparts vs. metabarcoding by species detections in the dataset?
+
+
+Apply Bray-Curtis to metabarcoding replicates, then, assuming everything is similar, use the P/A data for comparison with hardparts.
+```{r}
+library(vegan)
+
+# change df format for Bray-Curtis analysis
+clean_df_filtered
+
+```
+
+```{r}
+clean_df_filtered %>%
+  arrange(taxon_reads) %>%
+  # retaining taxa with 1 read seems crazy.
+  ggplot(aes(taxon_reads)) +
+  geom_histogram()
+```
+```{r}
+min_read_df <- clean_df_filtered %>%
+  filter(taxon_reads > 1)
+```
+
+
+
+
+```{r}
+## simple bray-curtis (downsampling, VRP)
+sample.df <- min_read_df %>%
+    #filter(ablg == "e03719") %>% # I think I need to do this sample-by-sample?
+    select(sample, taxon, taxon_reads) %>%
+    unique() %>% # ensure there are no duplicates because they will cause the pivot to fail later
+    group_by(taxon, sample) %>%
+    summarise(count = sum(taxon_reads))
+  
+  ### community-by-species matrix
+  # To run the Bray-Curtis and NMDS, we will use the function metaMDS. The function requires a community-by-species matrix.
+  
+  # reformat the dataframe - wider
+comm.wide.df <- sample.df %>%
+    pivot_wider(names_from = taxon, values_from = count)
+  
+  # replace all NAs with 0
+comm.wide.df[is.na(comm.wide.df)] <- 0
+comm.matrix <- column_to_rownames(comm.wide.df, var = "sample")
+  
+  # split apart the sample name in the data frame to get the strata
+  community.df.sep <- comm.wide.df %>%
+    separate(sample, into = c("ablg", "plate", "replicate"), remove = FALSE)
+  
+  # Calculating relative abundance and creating new dataframe with relative abundance data
+  relative.abund <- decostand(comm.matrix, method = "total") # standardization method = total, which probably makes the most sense because it sums over the rows (and not the columns - which would be among replicates... which is what we're curious to calculate the dissimilarity among)
+  
+  matrix.prop <- as.matrix(relative.abund)
+  
+  # jaccard similarity (presence/absence)
+  jaccard.dist <- vegdist(relative.abund, method = "jaccard")
+  
+  # generate an easily-filtered dataframe with any comparisons that are > 0.49 dissimilar
+  # Creating easy to view matrix
+  jaccard_distmat2 <- as.matrix(jaccard.dist, labels = T)
+  
+  as.data.frame.table(jaccard_distmat2) %>%
+  rename(rep1 = Var1, rep2 = Var2, Jaccard_dist = Freq) %>%
+  filter(Jaccard_dist > 0.5) 
+  
+  # Permanova for jaccard 
+  set.seed(129)
+  jaccard.pool.perm <- adonis2(jaccard.dist~plate, data = community.df.sep, permutations = 999, method = "jaccard")
+  
+  # Bray-Curtis dissimilarity
+  # Calculate distance matrix
+  bray.distmat <- vegdist(relative.abund, method = "bray")
+  
+  # generate an easily-filtered dataframe with any comparisons that are > 0.49 dissimilar
+  # Creating a matrix
+  bray_distmat2 <- as.matrix(bray.distmat, labels = T)
+  # reformat for easier filtering as a table
+  bray_df <- as.data.frame.table(bray_distmat2) %>%
+    rename(rep1 = Var1, rep2 = Var2, BrayCurtis_dist = Freq)
+
+```
+Both Jaccard and Bray-Curtis fare poorly with rare targets, I'd bet.
+
+```{r explore-a-bit-more}
+bray_reps <- bray_df %>%
+  separate(rep1, into = c("ablg.1", "plate.1", "rep.1")) %>%
+  separate(rep2, into = c("ablg.2", "plate.2", "rep.2") ) %>%
+  filter(ablg.1 == ablg.2) %>% # only the same ablg number
+  filter(plate.1 == plate.2) %>% # compare reps a and b
+  filter(rep.1 != rep.2) # but no need to compare replicates with themselves
+
+bray_reps %>%
+  ggplot(aes(BrayCurtis_dist)) +
+  geom_histogram()
+
+```
+The vast majority of a/b replicates are more similar than dissimilar.
+258 comparisons; 26 > 0.5
+
+almost exactly 10%
+
+
+Quickly take a look at any that are more dissimilar:
+```{r dissimilar-extraction-replicates}
+bray_reps %>%
+  filter(BrayCurtis_dist > 0.5) #%>%
+ # unique()
+
+
+```
+
+What about plate replicates?
+We would anticipate these being more similar than the extraction replicates, potentially.
+```{r plate-replicates-bray}
+bray_plates <- bray_df %>%
+  separate(rep1, into = c("ablg.1", "plate.1", "rep.1")) %>%
+  separate(rep2, into = c("ablg.2", "plate.2", "rep.2") ) %>%
+  filter(ablg.1 == ablg.2) %>% # only the same ablg number
+  filter(rep.1 == rep.2) %>% # compare plate replicates
+  filter(plate.1 != plate.2) # but no need to compare replicates with themselves
+
+bray_plates %>%
+  ggplot(aes(BrayCurtis_dist)) +
+    geom_histogram()
+```
+
+```{r}
+bray_plates %>%
+  filter(BrayCurtis_dist > 0.5) %>%
+  select(ablg.1) %>%
+  unique()
+```
+82/516
+
+```{r}
+82/516
+```
+~16% of PCR replicates were more dissimilar (from 11 samples)
+
+
+## Check fecal loops vs. scats
+
+## Get Kim's sequences for gadids/salmon
+
+
