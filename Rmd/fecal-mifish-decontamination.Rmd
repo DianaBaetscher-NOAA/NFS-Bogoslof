@@ -191,7 +191,7 @@ asv_table_filter2 <- pc_filtered_sample_df %>%
 
 now lets see how many of these ASVs have taxonomic IDs (these are not final tax ids)
 ```{r output-from-blastn-and-taxonkit}
-taxonomy <- read_csv("csv_outputs/fecal_mifish_collapsed_taxonomy.csv")
+taxonomy <- read_csv("csv_outputs/fecal_taxonomy_extra_gadidSalmon.csv")
 
 combined_df <- asv_table_filter2 %>%
   left_join(., taxonomy) 
@@ -206,7 +206,7 @@ combined_df %>%
   select(ASV) %>%
   unique()
 ```
-167 ASVs without taxonomy (removed).
+166 ASVs without taxonomy (removed).
 
 Some of those are selectively removed because they're off-target (i.e., primates, bacteria, etc.)
 
@@ -219,8 +219,6 @@ combined_df_noNA %>%
   summarise(sum(reads))
 
 ```
-
-## CHECK IN WITH KIM ABOUT SALMON/GADIDS SEQUENCES ##
 
 
 ```{r filter-controls-analyze-samples}
@@ -283,15 +281,15 @@ clean_df_filtered %>%
   unique()
   
   
-  filter(!is.na(hardparts)) %>%
-  ggplot(aes(x = alternative_ID, y = prop_taxon, fill = taxon)) +
-  geom_bar(stat = "identity") +
-  facet_grid(cols = vars(replicate), rows = vars(plate)) +
-  theme_minimal() +
-  theme(
-    legend.position = "none",
-    axis.text.x = element_text(angle = 90)
-  ) 
+  # filter(!is.na(hardparts)) %>%
+  # ggplot(aes(x = alternative_ID, y = prop_taxon, fill = taxon)) +
+  # geom_bar(stat = "identity") +
+  # facet_grid(cols = vars(replicate), rows = vars(plate)) +
+  # theme_minimal() +
+  # theme(
+  #   legend.position = "none",
+  #   axis.text.x = element_text(angle = 90)
+  # ) 
 
 ```
 From the hard parts, apparently we're just getting detections (y/n) for each of the species?
@@ -449,9 +447,80 @@ bray_plates %>%
 ```
 ~16% of PCR replicates were more dissimilar (from 11 samples)
 
+What about summarizing over all replicates. We assume that detections are true detections.
+```{r}
+presence_df <- min_read_df %>%
+  group_by(ablg) %>%
+  mutate(presence = ifelse(taxon_reads > 0, "1", "0")) %>%
+  select(ablg, alternative_ID, source, taxon, presence) %>%
+  unique() %>%
+  mutate(detection_method = "DNA")
+  
+presence_df
+```
+
+
+```{r}
+tmp_df <- hardparts_df %>%
+  filter(DNASample != "NULL") %>%
+  mutate(detection_method = "hardparts") %>%
+  rename(taxon = hardparts, alternative_ID = DNASample) %>%
+  select(-HardPartsSample, -SpeciesCode, -CommonName, -Notes) %>%
+  mutate(source = ifelse(str_detect(alternative_ID, "Cu23"), "scat matrix", NA)) %>%
+  mutate(source = ifelse(str_detect(alternative_ID, "AN"), "fecal loop", source)) %>%
+  mutate(taxon = str_replace(taxon, " sp.", "")) %>%
+  mutate(taxon = str_replace(taxon, "Actinopterygii", "Actinopteri")) %>%
+  mutate(taxon = str_replace(taxon, "Stenobrachius leucopsaurus", "Stenobrachius"))
+
+
+# plot comparison
+presence_df %>%
+  bind_rows(., tmp_df) %>%
+  mutate(taxon = str_replace(taxon, "Stenobrachius leucopsaurus", "Stenobrachius")) %>%
+  ggplot(aes(x = alternative_ID, fill = taxon)) +
+  geom_bar(stat = "count") +
+  facet_grid(rows = vars(detection_method), cols = vars(source), space = "free", scales = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  ) 
+  
+```
+
+```{r}
+combo_df <- presence_df %>%
+      mutate(taxon = str_replace(taxon, "Leuroglossus", "Leuroglossus schmidti")) %>%
+        mutate(taxon = str_replace(taxon, "Sebastes entomelas", "Sebastes")) %>%
+    mutate(taxon = str_replace(taxon, "Sebastes zacentrus", "Sebastes")) %>%
+  bind_rows(., tmp_df) %>%
+    mutate(taxon = str_replace(taxon, "Stenobrachius leucopsaurus", "Stenobrachius")) 
+
+ combo_df$taxon <- sub(" ", "_", combo_df$taxon)
+
+ 
+ combo_df %>%
+  group_by(taxon) %>%
+  add_tally() %>%
+  filter(source == "scat matrix") %>%
+  ggplot(aes(x = reorder(taxon, -n), fill = detection_method)) +
+  geom_bar(stat = "count") +
+  facet_grid(rows = vars(source), space = "free", scales = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  )  +
+  labs(x = "taxon",
+       y = "number of samples")
+  
+ggsave("pdf_outputs/NFSfecal_DNAhardparts.pdf", width = 8, height = 6)
+```
+
+
+
+
 
 ## Check fecal loops vs. scats
-
-## Get Kim's sequences for gadids/salmon
 
 

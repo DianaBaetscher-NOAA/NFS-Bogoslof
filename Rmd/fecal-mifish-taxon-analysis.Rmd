@@ -11,6 +11,18 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Using input data from the Rmd `fecal-mifish-dada2.Rmd` and blastn/taxonkit output from sedna and the eDNA VM.
 
+Plus, output from salmon/gadid custom database from Kim:
+
+```{sh, eval=F}
+# gadids
+blastn -query NFSfecal_MiFish_ASV_seqtab_nochim.csv -db ../custom_dbs/gadidae_db -out ../blastn/fecal_gadidae_results.txt -perc_identity 96 -qcov_hsp_perc 100 -num_threads 10 -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sscinames staxids'
+
+# salmon
+blastn -query NFSfecal_MiFish_ASV_seqtab_nochim.csv -db ../custom_dbs/oncorhynchus_db -out ../blastn/fecal_salmon_results.txt -perc_identity 96 -qcov_hsp_perc 100 -num_threads 10 -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sscinames staxids'
+```
+
+
+
 ```{r load-libraries}
 library(dplyr)
 library(tidyr)
@@ -20,21 +32,38 @@ library(ggplot2)
 ```
 
 ```{r load-output-from-taxonkit}
-taxonomy <-read.delim("../data/NFSfecal_mifish_shorttaxlineage.txt", header = FALSE, na.strings=c(""," ","NA"))
+taxonomy <-read_tsv("../data/NFSfecal_mifish_shorttaxlineage.txt", col_names = F)
+salmon <- read_tsv("../data/fecal_salmon_results.txt", col_names = F)
+gadids <- read_tsv("../data/fecal_gadidae_results.txt", col_names = F)
 
-head(taxonomy)
+
+# the ASV numbers should be consistent across the three blastn outputs.
+# so I should be able to remove the ASVs that occur in the salmon and gadid dbs from the full taxonomy df
+salmon_asv <- salmon %>%
+  select(X1) %>%
+  unique() 
+
+gadid_asv <- gadids %>%
+  select(X1) %>%
+  unique()
+
+taxonomy_wo_salmonGadids <- taxonomy %>%
+  anti_join(., salmon_asv) %>%
+  anti_join(., gadid_asv)
+
+
 ```
 
 # clean up the header a bit
 
 ```{r}
 # use the full taxonomy rather than the seq id to collapse identical entries
-tax_df <- taxonomy %>%
-  filter(V4 > 100) %>% # make sure all retained matches are >100 bp
-  select(-V2, -(V5:V16)) %>%  #remove unnecessary columns
-  group_by(V1, V17) %>% # group by the sequence key and the full taxonomy to reduce duplicate entries
+tax_df <- taxonomy_wo_salmonGadids %>%
+  filter(X4 > 100) %>% # make sure all retained matches are >100 bp
+  select(-X2, -(X5:X16)) %>%  #remove unnecessary columns
+  group_by(X1, X17) %>% # group by the sequence key and the full taxonomy to reduce duplicate entries
   unique() %>% # doing that reduced the number of entries from 146k to 17k
-  rename(qseqid=V1, perc_id=V3, length=V4, taxonomy=V17) %>% #rename headers
+  rename(ASV=X1, perc_id=X3, length=X4, taxonomy=X17) %>% #rename headers
   filter(!str_detect(taxonomy, "environmental")) %>% # filter out any environmental samples
   filter(!str_detect(taxonomy, "synthetic")) %>% # filter out any synthetic "samples"
   filter(!str_detect(taxonomy, "bacterium")) %>%
@@ -47,9 +76,11 @@ tax_df <- taxonomy %>%
 ```{r how-many-total-ASVs-w-taxonomy}
 tax_df %>% 
   ungroup() %>%
-  select(qseqid) %>%
+  select(ASV) %>%
   unique()
+
 ```
+This doesn't include salmon/gadids at this point.
 
 
 ### taxonomy clean-up
@@ -67,7 +98,7 @@ Manually dealing with messy hybrid data:
 ```{r}
 fixed_tax_df <- taxon_df %>%
   filter(!str_detect(species, " x ")) %>% # remove hybrids
-  filter(!species %in% c("Homo sapiens", "Canis lupus", "Oncorhynchus kawamurae", "Ammodytes japonicus", "Sebastes baramenuke", "Sebastes cheni", "Sebastes inermis", "uncultured bacterium")) %>% # remove species outside of their range
+  filter(!species %in% c("Homo sapiens", "Canis lupus", "Oncorhynchus kawamurae", "Ammodytes japonicus", "Sebastes baramenuke", "Sebastes cheni", "Sebastes inermis", "uncultured bacterium", "Hexagrammos otakii")) %>% # remove species outside of their range
   filter(!str_detect(species, " sp. ")) %>%
   filter(!genus %in% c("Sus", "Bos", "Gorilla")) %>% # remove non-marine mammals
   filter(!order %in% c("Primates"))
@@ -82,28 +113,33 @@ Sequences that match multiple species are divided in three categories:
 3. top matches < 2% identity than second-ranked matches
 4. Multiple top matches with the same % identity
 
-```{r}
+```{r single-species-sequences}
 # 1. sequences that are unambiguously a single species
 single_spp_seqs <- fixed_tax_df %>% 
-  group_by(qseqid) %>%
+  group_by(ASV, species) %>%
+  tally() %>% # how many species per ASV?
+  group_by(ASV) %>%
+  select(-n) %>%
   add_tally(name = "n_taxa") %>%
   filter(n_taxa == 1)
   
 single_spp_seqs
 ```
+196 ASVs that are unique to a single species.
 
-```{r}
+
+```{r filter-taxonomy-to-exclude-single-species-ASVs}
 # remove the single-species seqs from the dataframe and then rank the hits by % identity for the remaining seqs
 seq_id_diff <- fixed_tax_df %>%
   anti_join(., single_spp_seqs) %>%
   select(-length) %>%
-  group_by(qseqid, species, genus, family, order, class, phylum, kingdom) %>%
+  group_by(ASV, species, genus, family, order, class, phylum, kingdom) %>%
     mutate(seq_percID = max(perc_id)) %>%
-    group_by(qseqid, species, genus, family, order, class, phylum, kingdom, seq_percID) %>%
+    group_by(ASV, species, genus, family, order, class, phylum, kingdom, seq_percID) %>%
   summarise(max(seq_percID)) %>% # take just the top hit for each taxon (for each sequence)
   select(-`max(seq_percID)`) %>%
   ungroup() %>%
-  group_by(qseqid) %>%
+  group_by(ASV) %>%
       mutate(id_rank = rank(desc(seq_percID), ties.method = "min")) %>% # rank the taxonomic hits per sequence by % id
        mutate(top_perc = max(seq_percID)) %>% # designate the highest % id for the best taxonomic hit in each sequence (in some, but not all cases, this is 100%)   
       mutate(diff = top_perc - seq_percID) %>% # calculate the difference between the % identity of the top hit and each subsequent taxonomic hit
@@ -113,48 +149,36 @@ seq_id_diff %>%
   filter(diff > 0)
 ```
 
-Now I have the single best entry for each species for each sequence ranked and with the difference between the first and second ranked entries calculated.
+Now I have the single best entry for each species for each sequence ranked with the difference between the first and second ranked entries calculated.
 
 For sequences with multiple top hits, where the difference between ranked taxa = 0, I will end up defaulting to genus- or family-level ID (or carrying the individual species info around in some capacity). I will do the same for any sequences where the difference betweeen the first and second ranked taxa is < 2%.
 
 
 Figure out which differences are > 2% and eliminate those first?
-```{r}
+```{r remove-low-perc-identity-matches}
 # filter out any taxa that are >2% less matching identity than the top taxonomic hit for a given sequence
 to_remove_low_perc_hits <- seq_id_diff %>%
   ungroup() %>%
-  group_by(qseqid) %>%
-  filter(diff > 2)
+  group_by(ASV) %>%
+  filter(diff > 2) # there are zero of those in this dataset.
 
 keepers <- seq_id_diff %>%
   anti_join(to_remove_low_perc_hits)
 
 ```
 
-```{r}
+```{r all-higher-level-taxonomic-assignments}
 # this data frame includes only those taxonomic hits that should be considered.
 # so now I need to determine whether they should be assigned to genus, family, order, etc. 
-singletons <- keepers %>%
-  select(qseqid) %>%
-  tally() %>%
-  filter(n == 1)
-
-# these are the seqs that now have only a single match
-singleton_df <- singletons %>%
-  left_join(keepers) %>%
-  select(-n) %>%
-  bind_rows(single_spp_seqs) %>% # combine the single spp data
-  mutate(taxonomic_level = "species") %>%
-  mutate(taxon = species)
 
 ## Genus-level matches
 # remove the singletons from the bigger df 
 single_genus <- keepers %>%
-  anti_join(singleton_df)%>% # at best, these should be genus-level matches
-  group_by(qseqid, genus) %>%
+  anti_join(., single_spp_seqs, by = "ASV") %>% # at best, these should be genus-level matches
+  group_by(ASV, genus) %>%
   tally() %>%
   ungroup() %>%
-  group_by(qseqid) %>%
+  group_by(ASV) %>%
   tally() %>%
   filter(n == 1) %>% # seqs that match a single genus
   select(-n) %>%
@@ -165,12 +189,12 @@ single_genus <- keepers %>%
 
 ## Family-level matches
 single_family <- keepers %>%
-  anti_join(singleton_df)%>%
-  anti_join(single_genus) %>%
-  group_by(qseqid, family) %>%
+  anti_join(., single_spp_seqs, by = "ASV") %>%
+  anti_join(., single_genus) %>%
+  group_by(ASV, family) %>%
   tally() %>%
   ungroup() %>%
-  group_by(qseqid) %>%
+  group_by(ASV) %>%
   tally() %>%
   filter(n == 1) %>% # seqs that match a single family
   select(-n) %>%
@@ -181,13 +205,13 @@ single_family <- keepers %>%
 
 ## Order-level matches
 single_order <- keepers %>%
-  anti_join(singleton_df)%>%
-  anti_join(single_genus) %>%
-  anti_join(single_family) %>%
-  group_by(qseqid, order) %>%
+ anti_join(., single_spp_seqs, by = "ASV") %>%
+  anti_join(., single_genus) %>%
+  anti_join(., single_family) %>%
+  group_by(ASV, order) %>%
   tally() %>%
   ungroup() %>%
-  group_by(qseqid) %>%
+  group_by(ASV) %>%
   tally() %>%
   filter(n == 1) %>% # seqs that match a single order
   select(-n) %>%
@@ -198,14 +222,14 @@ single_order <- keepers %>%
 
 ## Class-level matches
 single_class <- keepers %>%
-  anti_join(singleton_df)%>%
-  anti_join(single_genus) %>%
-  anti_join(single_family) %>%
-  anti_join(single_order) %>%
-  group_by(qseqid, class) %>%
+  anti_join(., single_spp_seqs, by = "ASV") %>%
+  anti_join(., single_genus) %>%
+  anti_join(., single_family) %>%
+  anti_join(., single_order) %>%
+  group_by(ASV, class) %>%
   tally() %>%
   ungroup() %>%
-  group_by(qseqid) %>%
+  group_by(ASV) %>%
   tally() %>% 
   filter(n == 1) %>% # seqs that match a single class
   select(-n) %>%
@@ -215,21 +239,131 @@ single_class <- keepers %>%
 
 # no higher level taxonomy was relevant in this dataset.
 ```
-only 6 ASVs stuck at class
-
-
-Modify the singleton_df to include the right variable headers
-```{r}
-single_spp <- singleton_df %>%
+```{r combine-taxonomic-level-df}
+# Modify the singleton_df to include the right variable headers
+species_asvs <- single_spp_seqs %>%
+  left_join(., fixed_tax_df) %>%
   select(-perc_id, -length, -n_taxa) %>%
   mutate(taxonomic_level = "species") %>%
+  mutate(taxon = species) %>%
+  group_by(ASV, species) %>%
+  unique()
+  
+# combine those sub-dataframes
+tax_df_wo_gadidSalmon <- bind_rows(single_class, single_order, single_family, single_genus, species_asvs) %>%
+  select(-id_rank, -top_perc, -diff, -seq_percID)
+  
+
+```
+## Now look at gadids and salmon ##
+
+for both of these species, I'll use a 0.5% difference based on the small number of bp differences that distinguish species.
+
+```{r}
+# summarize data from custom database
+salmon_gadid_spp <- bind_rows(salmon, gadids) %>%
+  rename(ASV = X1, species = X2, perc_id = X3) %>%
+  select(1:3)
+  
+# are there any single-species sequences?
+# 1. sequences that are unambiguously a single species
+salmon_gadid_spp %>% 
+  group_by(ASV, species) %>%
+  tally() %>% # how many species per ASV?
+  group_by(ASV) %>%
+  select(-n) %>%
+  add_tally(name = "n_taxa") %>%
+  filter(n_taxa == 1)
+
+# nope, not shocking, but no single-species sequences
+```
+
+
+```{r}
+# identify the highest percent ID per ASV and then evaluate if it's >0.5% from the next species
+sal_gad_df <- salmon_gadid_spp %>%
+  group_by(ASV, species) %>%
+   mutate(seq_percID = max(perc_id)) %>%
+    group_by(ASV, species, seq_percID) %>%
+  summarise(max(seq_percID)) %>% # take just the top hit for each taxon (for each sequence)
+  select(-`max(seq_percID)`) %>%
+  ungroup() %>%
+  group_by(ASV) %>%
+      mutate(id_rank = rank(desc(seq_percID), ties.method = "min")) %>% # rank the taxonomic hits per sequence by % id
+       mutate(top_perc = max(seq_percID)) %>% # designate the highest % id for the best taxonomic hit in each sequence (in some, but not all cases, this is 100%)   
+      mutate(diff = top_perc - seq_percID) %>% # calculate the difference between the % identity of the top hit and each subsequent taxonomic hit
+        arrange(diff)
+
+
+# Now identify which ASVs have > 0.5% between species
+sal_gad_top <- sal_gad_df %>%
+  filter(diff < 0.5) %>%
+  separate(species, into = c("genus", "spp"), remove = F) %>%
+  mutate(family = ifelse(genus %in% c("Gadus","Boreogadus", "Microgadus", "Eleginus"), "Gadidae", "Salmonidae"))
+
+# now are there single-species asvs?
+ss_asvs_salgad <- sal_gad_top %>%
+  group_by(ASV) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  left_join(., sal_gad_top) %>%
+  select(-n, -id_rank, -top_perc, -diff) %>%
+  mutate(taxonomic_level = "species") %>%
   mutate(taxon = species)
+  
+# 77 species-specific sequences
+
+genus_salgad <- sal_gad_top %>%
+  anti_join(., ss_asvs_salgad) %>%
+  group_by(ASV, genus) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(ASV) %>%
+  tally() %>%
+  filter(n == 1) %>% # seqs that match a single genus
+  select(-n) %>%
+  left_join(., sal_gad_top) %>%
+  mutate(taxonomic_level = "genus") %>%
+  mutate(taxon = genus)
+
+genus_salgad %>%
+  select(ASV) %>%
+  unique()
+
+# 53 genus-specific sequences
+
+# family-level
+family_salgad <- sal_gad_top %>%
+  anti_join(., ss_asvs_salgad) %>%
+  anti_join(., genus_salgad) %>%
+  group_by(ASV, family) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(ASV) %>%
+  tally() %>%
+  filter(n == 1) %>% # seqs that match a single genus
+  select(-n) %>%
+  left_join(., sal_gad_top) %>%
+  mutate(taxonomic_level = "family") %>%
+  mutate(taxon = family)
+
+# 2 ASVs that match family-level for Gadidae
+
+
+# merge those dataframes
+sal_gadid_filtered_tax <- bind_rows(family_salgad, genus_salgad, ss_asvs_salgad) %>%
+  select(1:3, 9:11)
 
 ```
 
-```{r}
+```{r combine-and-output-taxonomy}
 # recombine the full data set now that the appropriate level of taxonomy has been determined
-sorted_tax_df <- bind_rows(single_class, single_order, single_family, single_genus, single_spp)
+sorted_tax_df <- bind_rows(sal_gadid_filtered_tax, tax_df_wo_gadidSalmon)
+
+sorted_tax_df %>%
+  select(ASV, taxon, taxonomic_level) %>%
+  unique() %>%
+  write_csv("csv_outputs/fecal_taxonomy_extra_gadidSalmon.csv")
 
 ```
 
@@ -349,9 +483,6 @@ When a valid name was not found, the presence of a species in the study area was
 #          #in_range = ifelse(Species == "Polypera greeni", "yes", in_range))  ## Liparis greeni
 ```
 
-```{r}
-to_check_range
-```
 
 
 
@@ -377,24 +508,24 @@ uncollapsed_taxonomy
 
 # and then collapse that down to just a single taxon per ASV
 collapsed_taxonomy <- uncollapsed_taxonomy %>%
-  select(qseqid, taxon, taxonomic_level) %>%
+  select(ASV, taxon, taxonomic_level) %>%
   unique()
 
 # then remove those high level taxonomic assignments that aren't informative
 collapsed_taxonomy %>%
   #filter(!taxonomic_level %in% c("class", "order")) %>%
-  select(-qseqid) %>%
+  select(-ASV) %>%
   unique()
 
 
 collapsed_taxonomy %>%
-  select(-qseqid) %>%
+  select(-ASV) %>%
   unique() %>%
   group_by(taxonomic_level) %>%
   tally()
 
 collapsed_taxonomy %>%
-  rename(ASV = qseqid) %>%
+  rename(ASV = ASV) %>%
   write_csv("csv_outputs/fecal_mifish_collapsed_taxonomy.csv")
 ```
 
