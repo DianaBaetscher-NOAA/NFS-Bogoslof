@@ -16,7 +16,14 @@ Borrowing from Kim's Bering Sea data decon procedure...
 ```{r load-libraries}
 library(tidyverse)
 
+collapsed_taxonomy <- read_csv("csv_outputs/inrange_collapsed_fecal_mifish_taxonomy.csv")
+
+collapsed_taxonomy %>%
+  filter(str_detect(taxon, "Oncorhynchus"))
+
 ```
+Those observations are in the dataframe, but I'm adding a different dataframe!
+
 
 
 ```{r load-sample-info}
@@ -191,7 +198,7 @@ asv_table_filter2 <- pc_filtered_sample_df %>%
 
 now lets see how many of these ASVs have taxonomic IDs (these are not final tax ids)
 ```{r output-from-blastn-and-taxonkit}
-taxonomy <- read_csv("csv_outputs/fecal_taxonomy_extra_gadidSalmon.csv")
+taxonomy <- read_csv("csv_outputs/inrange_collapsed_fecal_mifish_taxonomy.csv")
 
 combined_df <- asv_table_filter2 %>%
   left_join(., taxonomy) 
@@ -205,8 +212,9 @@ combined_df %>%
   ungroup() %>%
   select(ASV) %>%
   unique()
+
 ```
-166 ASVs without taxonomy (removed).
+188 ASVs without taxonomy (removed).
 
 Some of those are selectively removed because they're off-target (i.e., primates, bacteria, etc.)
 
@@ -405,17 +413,18 @@ bray_reps %>%
 
 ```
 The vast majority of a/b replicates are more similar than dissimilar.
-258 comparisons; 26 > 0.5
+258 comparisons; 24 > 0.5
 
-almost exactly 10%
-
+```{r}
+24/258
+```
+just under 10% (9.3%)
 
 Quickly take a look at any that are more dissimilar:
 ```{r dissimilar-extraction-replicates}
 bray_reps %>%
   filter(BrayCurtis_dist > 0.5) #%>%
  # unique()
-
 
 ```
 
@@ -448,16 +457,86 @@ bray_plates %>%
 ~16% of PCR replicates were more dissimilar (from 11 samples)
 
 What about summarizing over all replicates. We assume that detections are true detections.
-```{r}
+```{r insert-min-read-depth}
+min_read_df %>%
+  ggplot(aes(taxon_reads)) +
+    geom_histogram()
+
 presence_df <- min_read_df %>%
   group_by(ablg) %>%
-  mutate(presence = ifelse(taxon_reads > 0, "1", "0")) %>%
+  mutate(presence = ifelse(taxon_reads > 10 & prop_taxon > 0.1, "1", "0")) %>%
   select(ablg, alternative_ID, source, taxon, presence) %>%
   unique() %>%
   mutate(detection_method = "DNA")
   
 presence_df
 ```
+I wonder if samples with less material (fewer total reads) have a different composition than samples with a greater number of total reads?
+```{r do-lower-depth-samples-have-more-species?}
+# Somewhat counterintuitive, but I'm thinking of them acting like negative controls... with lower amounts of DNA to amplify (other than predator DNA)
+
+depth_df <- min_read_df %>%
+  mutate(depth = ifelse(total_reads < 1000, "< 1,000", NA)) %>%
+  mutate(depth = ifelse(total_reads > 1000 & total_reads < 5000, "< 5,000", depth)) %>%
+    mutate(depth = ifelse(total_reads > 5000 & total_reads < 10000, "< 10,000", depth)) %>%
+    mutate(depth = ifelse(total_reads > 10000, "> 10,000", depth)) 
+
+depth_df %>%
+  #filter(taxon_reads > 10) %>%
+  ggplot(aes(x = sample, y = taxon_reads/total_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(depth), scales = "free_x", space = "free") +
+    theme_bw() +
+  theme(
+    legend.position = "none",
+    #axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    axis.text.x = element_blank()
+  ) 
+
+```
+What about a species accumulation curve or similar based on the read depth?
+```{r}
+depth_df %>%
+  group_by(sample) %>%
+  add_tally(name = "n_taxa") %>%
+  group_by(depth) %>%
+  summarise(mean(n_taxa))
+  
+```
+Interesting. Samples with < 5000 reads have, on average, 2 additional taxa than samples with > 10,000 reads.
+
+What if I just look by genus?
+Need to deal with some manual taxonomy stuff.
+
+```{r}
+depth_df %>%
+  group_by(ablg) %>%
+  mutate(presence = ifelse(taxon_reads > 10, "1", "0")) %>%
+  ungroup() %>%
+  select(taxon) %>%
+  unique() %>%
+  arrange(taxon)
+
+
+```
+72 taxon (species/genus/family)
+
+Major constituents:
+i.e., >10% of a given sample:
+```{r}
+min_read_df %>%
+  filter(total_reads > 1000) %>% # samples with so few prey reads are less reliable
+  filter(prop_taxon > 0.1) %>%
+  ungroup() %>%
+  arrange(desc(prop_taxon)) %>%
+  select(taxon) %>%
+  unique()
+
+```
+
+
+
+
 
 
 ```{r}
@@ -490,16 +569,17 @@ presence_df %>%
 
 ```{r}
 combo_df <- presence_df %>%
-      mutate(taxon = str_replace(taxon, "Leuroglossus", "Leuroglossus schmidti")) %>%
-        mutate(taxon = str_replace(taxon, "Sebastes entomelas", "Sebastes")) %>%
-    mutate(taxon = str_replace(taxon, "Sebastes zacentrus", "Sebastes")) %>%
-  bind_rows(., tmp_df) %>%
-    mutate(taxon = str_replace(taxon, "Stenobrachius leucopsaurus", "Stenobrachius")) 
+    #   mutate(taxon = ifelse(taxon == "Leuroglossus", "Leuroglossus schmidti", taxon)) %>%
+    #     mutate(taxon = str_replace(taxon, "Sebastes entomelas", "Sebastes")) %>%
+    # mutate(taxon = str_replace(taxon, "Sebastes zacentrus", "Sebastes")) %>%
+  bind_rows(., tmp_df) 
+    # mutate(taxon = str_replace(taxon, "Stenobrachius leucopsaurus", "Stenobrachius")) 
 
  combo_df$taxon <- sub(" ", "_", combo_df$taxon)
 
  
  combo_df %>%
+  filter(taxon != "Actinopteri") %>%
   group_by(taxon) %>%
   add_tally() %>%
   filter(source == "scat matrix") %>%
@@ -515,12 +595,296 @@ combo_df <- presence_df %>%
        y = "number of samples")
   
 ggsave("pdf_outputs/NFSfecal_DNAhardparts.pdf", width = 8, height = 6)
+
+# and then output a couple of plots with different taxonomic levels:
+combo_df %>%
+  filter(taxon != "Actinopteri") %>%
+  mutate(taxon = ifelse(str_detect(taxon, "Sebastes"), "Sebastes", taxon)) %>%
+  mutate(taxon = ifelse(taxon == "Hexagrammos", "Hexagrammidae", taxon)) %>%
+  group_by(taxon) %>%
+  add_tally() %>%
+  filter(source == "scat matrix") %>%
+  mutate(taxonomic_level = ifelse(str_detect(taxon, "_"), "species", "genus")) %>%
+  mutate(taxonomic_level = ifelse(str_detect(taxon, "dae"), "family", taxonomic_level)) %>%
+  ggplot(aes(x = reorder(taxon, -n), fill = detection_method)) +
+  geom_bar(stat = "count") +
+  facet_grid(cols = vars(taxonomic_level), space = "free", scales = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  )  +
+  labs(y = "number of samples",
+       x = "",
+       title = "Minimum filters: taxa with > 10 reads and >10% of reads in 1 replicate")
+
+ggsave("pdf_outputs/NFSfecal_DNAhardparts_taxlevel.jpg", width = 10, height = 6)
+
 ```
 
 
+Myctophids?
+```{r}
+check <- read_csv("csv_outputs/inrange_fecal_mifish_collapsed_taxonomy.csv")
+
+all_taxa <-read_tsv("../data/NFSfecal_mifish_shorttaxlineage.txt", col_names = F)
+
+
+check %>%
+  left_join(., all_taxa, by = c("ASV" = "X1")) %>%
+  filter(str_detect(X17, "Myctophidae")) %>%
+  select(taxon, taxonomic_level) %>%
+  unique()
+
+```
+Two species: Northern lanternfish and garnet lanternfish
 
 
 
-## Check fecal loops vs. scats
+```{r}
+# separate sculpins
+check %>%
+  left_join(., all_taxa, by = c("ASV" = "X1")) %>%
+  filter(str_detect(X17, "Cottidae")) %>%
+  select(taxon, taxonomic_level) %>%
+  unique()
+  
+```
+44 ASVs that correspond to sculpins of various sorts.
+8 sculpins across taxonomic levels
+
+
+Don't worry about hard parts and just look at metabarcoding results:
+
+- fecal loops vs. scats
+- number of species per scat
+- any additional suspected contamination?
+
+
+```{r}
+# combine genus/family level as appropriate
+# for ease of including the legend!
+min_read_df %>%
+  filter(prop_taxon > 0.05) %>% # taxa that make up >1% of sequencing reads
+  group_by(alternative_ID, taxon) %>%
+  mutate(mean_taxon_reads = mean(taxon_reads)) %>%
+  select(-taxon_reads, -sample, -plate, -replicate, -prop_taxon, -total_reads) %>%
+  unique() %>%
+  mutate(taxon = ifelse(str_detect(taxon, "Sebastes"), "Sebastes", taxon)) %>%
+  mutate(taxon = ifelse(taxon == "Hexagrammos", "Hexagrammidae", taxon)) %>%
+  mutate(taxon = ifelse(taxon == "Gadus", "Gadidae", taxon)) %>%
+  ggplot(aes(x = alternative_ID, y = mean_taxon_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(source), scales = "free", space = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.title = element_blank(),
+               legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, 'cm'),
+    title = element_text(size = 8)
+  )  +
+  labs(y = "Mean sequencing reads",
+       x = "",
+       title = "Minimum filters: taxa with >10 reads and >5% of reads")
+
+
+ggsave("pdf_outputs/fecal_mifish_filtered_read_depth.jpg", width = 8, height = 5)
+```
+Do I see multiple species of salmon in a single scat? The might be a red flag that the 0.5% taxonomic assignment is overly confident.
+
+
+```{r plot-proportions}
+filtered_df <- min_read_df %>%
+  mutate(taxon = ifelse(str_detect(taxon, "Sebastes"), "Sebastes", taxon)) %>%
+  mutate(taxon = ifelse(taxon == "Hexagrammos", "Hexagrammidae", taxon)) %>%
+  mutate(taxon = ifelse(taxon == "Gadus", "Gadidae", taxon)) %>%
+  filter(prop_taxon > 0.05) %>% # taxa that make up >5% of sequencing reads in each replicate
+  group_by(alternative_ID, taxon) %>%
+  mutate(mean_taxon_reads = mean(taxon_reads)) %>%
+  select(-taxon_reads, -sample, -plate, -replicate, -prop_taxon, -total_reads) %>%
+  unique() %>%
+  group_by(alternative_ID) %>%
+  mutate(sample_reads = sum(mean_taxon_reads)) 
+
+filtered_df %>%
+  ggplot(aes(x = alternative_ID, y = mean_taxon_reads/sample_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(source), scales = "free", space = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.title = element_blank(),
+               legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, 'cm'),
+    title = element_text(size = 8)
+  )  +
+  labs(y = "Proportion of sequencing reads",
+       x = "",
+       title = "Minimum filters: taxa with >10 reads and >5% of reads")
+
+ggsave("pdf_outputs/fecal_mifish_filtered_proportions.jpg", width = 8, height = 5)
+
+```
+
+Some of the samples with fewer reads have more taxa... those I wouldn't believe.
+
+Based on that filtering, how many taxa per sample?
+```{r}
+filtered_df %>%
+  select(taxon, alternative_ID, source) %>%
+  unique() %>%
+  tally()
+
+```
+
+```{r samples-w-multiple-spp-salmon?}
+filtered_df %>%
+  filter(str_detect(taxon, "Oncorhynchus")) %>%
+  ggplot(aes(x = alternative_ID, y = mean_taxon_reads/sample_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(source), scales = "free", space = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.title = element_blank(),
+               legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, 'cm'),
+    title = element_text(size = 8)
+  )  +
+  labs(y = "Proportion of sequencing reads",
+       x = "",
+       title = "Salmonids with minimum filters: taxa with >10 reads and >5% of reads") +
+  scale_fill_brewer(palette = "Dark2")
+
+ggsave("pdf_outputs/fecal_mifish_filtered_salmon_reads.jpg", width = 8, height = 5)
+
+```
+
+```{r samples-w-multiple-gadid-species?}
+filtered_df %>%
+  filter(str_detect(taxon, "Gadus") | str_detect(taxon, "Gadidae")) %>%
+  ggplot(aes(x = alternative_ID, y = mean_taxon_reads/sample_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(source), scales = "free", space = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.title = element_blank(),
+               legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, 'cm'),
+    title = element_text(size = 8)
+  )  +
+  labs(y = "Proportion of sequencing reads",
+       x = "",
+       title = "Gadids with minimum filters: taxa with >10 reads and >5% of reads") +
+  scale_fill_brewer(palette = "Dark2")
+
+ggsave("pdf_outputs/fecal_mifish_filtered_gadids.jpg", width = 8, height = 5)
+
+```
+
+
+```{r dominant-taxa-by-sample}
+filtered_df %>%
+  filter(mean_taxon_reads/sample_reads > 0.2) %>%
+  ggplot(aes(x = alternative_ID, y = mean_taxon_reads/sample_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(source), scales = "free", space = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.title = element_blank(),
+               legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, 'cm'),
+    title = element_text(size = 8)
+  )  +
+  labs(y = "Proportion of sequencing reads",
+       x = "",
+       title = "Taxa that comprise >20% of reads with minimum filters") +
+  scale_fill_brewer(palette = "Set3")
+
+ggsave("pdf_outputs/fecal_mifish_filtered_dominant_taxa_proportion.jpg", width = 8, height = 5)
+
+```
+
+
+Using relatively stringent thresholds, how do the fecal loops compare to the scats?
+
+```{r dominant-taxa-by-source}
+filtered_df %>%
+  filter(mean_taxon_reads/sample_reads > 0.2) %>%
+  group_by(source, taxon) %>%
+  summarise(proportion = mean(mean_taxon_reads/sample_reads)) %>%
+  unique() %>%
+  group_by(source) %>%
+  ggplot(aes(x = source, y = proportion, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  #facet_grid(cols = vars(source), scales = "free", space = "free") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.title = element_blank(),
+               legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, 'cm'),
+    title = element_text(size = 8)
+  )  +
+  labs(y = "Proportion of sequencing reads",
+       x = "",
+       title = "Taxa that comprise >20% of reads with minimum filters") +
+  scale_fill_brewer(palette = "Set3")
+  
+
+```
+
+```{r %FO-data}
+filtered_df %>%
+  filter(source == "scat matrix") %>%
+  mutate(FO_group = ifelse(str_detect(taxon, "Oncorhynchus"), "Oncorhynchus", NA)) %>%
+  mutate(FO_group = ifelse(str_detect(taxon, "Stenobrachius"), "Myctophid", FO_group)) %>%
+   mutate(FO_group = ifelse(str_detect(taxon, "Gadus"), "Gadus", FO_group)) %>%
+   mutate(FO_group = ifelse(taxon %in% c("Leuroglossus schmidti", "Pleurogrammus monopterygius"), taxon, FO_group)) %>%
+  select(alternative_ID, FO_group) %>%
+  unique() %>%
+  group_by(FO_group) %>%
+  tally() %>%
+  mutate(n_scats = 32) %>%
+  mutate(`%FO` = n/n_scats)
+  
+# total number of scats: 32
+filtered_df %>%
+  filter(source == "scat matrix") %>%
+  filter( str_detect(taxon, "Oncorhynchus") |
+           taxon %in% c("Leuroglossus schmidti", "Pleurogrammus monopterygius") |
+           str_detect(taxon, "Stenobrachius") |
+           str_detect(taxon, "Gadus")) %>%
+  select(alternative_ID) %>%
+  unique()
+```
+
+```{r}
+filtered_df %>%
+  filter(source == "fecal loop")
+  
+  mutate(FO_group = ifelse(str_detect(taxon, "Oncorhynchus"), "Oncorhynchus", NA)) %>%
+  mutate(FO_group = ifelse(str_detect(taxon, "Stenobrachius"), "Myctophid", FO_group)) %>%
+   mutate(FO_group = ifelse(str_detect(taxon, "Gadus"), "Gadus", FO_group)) %>%
+   mutate(FO_group = ifelse(taxon %in% c("Leuroglossus schmidti", "Pleurogrammus monopterygius"), taxon, FO_group)) %>%
+  select(alternative_ID, FO_group) %>%
+  unique() %>%
+  group_by(FO_group) %>%
+  tally() %>%
+  mutate(n_loops = 11) %>%
+  mutate(`%FO` = n/n_loops)
+
+```
+
+
 
 

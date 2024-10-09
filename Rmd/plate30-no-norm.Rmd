@@ -311,7 +311,7 @@ no_norm_collapsed %>%
       axis.title.y = element_text(margin = margin(r = 5))
     ) +
     labs(
-      title = "Bogoslof: plate 30\n Reads summed across 3 L of water; 9 PCR replicates",
+      title = "Bogoslof: plate 30\nReads summed across 3 L of water, 9 PCR replicates",
       x = "Taxon",
       y = "Site",
       fill = "log10(reads)"

@@ -163,6 +163,65 @@ ggsave("pdf_outputs/plate30_normalized_site.pdf", height = 5, width = 8)
 
 Still need to think about the evenness of coverage across samples/reps.
 
+```{r check-plate29}
+asv_w_meta %>%
+  filter(extraction_plate == "29_2023") %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid")) %>%
+   filter(!is.na(taxon) &
+           sample != "Undetermined") %>% 
+  group_by(location2, location3, taxon) %>%
+  mutate(reads_by_site = sum(reads)) %>%
+  select(reads_by_site, location2, location3, taxon) %>%
+  unique() %>%
+  mutate(location3 = ifelse(is.na(location3), "fieldBlank", location3)) %>%
+  unite(location2, location3, col = "site") %>%
+  ggplot(aes(x = site, y = reads_by_site, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  #facet_wrap(~site, scales = "free") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5)
+  ) +
+  labs(
+    title = "Reads summed across field/lab replicates by site"
+  )
+  
+ggsave("pdf_outputs/plate29_normalized_site.pdf", height = 5, width = 8)
+
+```
+
+
+Look at the replicates again:
+
+```{r plate29-replicates}
+asv_w_meta %>%
+  filter(extraction_plate == "29_2023") %>%
+  left_join(., collapsed_taxonomy, by = c("ASV" = "qseqid")) %>%
+   filter(!is.na(taxon) &
+           sample != "Undetermined") %>% 
+  group_by(location2, location3, taxon, replicate) %>%
+  mutate(reads_by_rep = sum(reads)) %>%
+  select(reads_by_rep, location2, location3, taxon) %>%
+  unique() %>%
+  mutate(location3 = ifelse(is.na(location3), "fieldBlank", location3)) %>%
+  unite(location2, location3, replicate, col = "site") %>%
+  ggplot(aes(x = site, y = reads_by_rep, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  #facet_wrap(~site, scales = "free") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.9, vjust = 0.5)
+  ) +
+  labs(
+    title = "Reads by replicate"
+  )
+  
+ggsave("pdf_outputs/plate29_normalized_replicate.pdf", height = 4.5, width = 10)
+
+
+
+```
+
 
 
 ```{r}
