@@ -174,6 +174,7 @@ plate30_norm_collapsed <- plate30_norm %>%
   mutate(reads_by_site = sum(reads)) %>%
   select(reads_by_site, location2, location3, taxon) %>%
   unique() %>%
+  ungroup() %>%
   mutate(location3 = ifelse(is.na(location3), "fieldBlank", location3)) %>%
   unite(location2, location3, col = "site") %>%
   mutate(run = "norm") %>% 
@@ -318,5 +319,50 @@ no_norm_collapsed %>%
     ) 
 
 ggsave("pdf_outputs/NFS_plate30_comparison_log10.pdf", width = 8, height = 6)
+```
+
+How many individual sample replicates have < 1000 reads?
+
+```{r looking-for-drop-out-samples}
+asv_tbl_long %>%
+  group_by(sample) %>%
+  summarise(total_reads = sum(reads)) %>%
+  filter(total_reads < 1000) %>%
+  separate(sample, into = c("extraction_ID", "replicate")) %>%
+  left_join(., meta, by = "extraction_ID") %>%
+  filter(!is.na(sample_type)) %>%
+  select(extraction_ID, replicate, total_reads, location2, location3, sample_type) %>%
+  filter(sample_type != "field_blank")
+
+
+```
+
+```{r variation-across-sample-replicates}
+asv_tbl_long %>%
+  separate(sample, into = c("extraction_ID", "replicate")) %>%
+  left_join(., meta, by = "extraction_ID") %>%
+  filter(!is.na(sample_type)) %>%
+  ggplot(aes(x = replicate, y = reads, fill = ASV)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(location3), cols = vars(extraction_ID), space = "free") +
+  theme(
+    legend.position = "none"
+  )
+
+```
+
+
+What about the normalized samples?
+```{r}
+plate30_norm %>%
+  filter(!is.na(sample_type)) %>%
+  ggplot(aes(x = replicate, y = reads, fill = ASV)) +
+  geom_bar(stat = "identity") +
+  facet_grid(rows = vars(location3), cols = vars(extraction_ID), space = "free") +
+  theme(
+    legend.position = "none"
+  )
+
+
 ```
 

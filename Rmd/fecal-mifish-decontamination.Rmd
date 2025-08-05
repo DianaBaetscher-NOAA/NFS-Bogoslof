@@ -12,6 +12,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Borrowing from Kim's Bering Sea data decon procedure...
 
+Data analysis used for Jamie's AMSS poster.
+
 
 ```{r load-libraries}
 library(tidyverse)
@@ -316,6 +318,19 @@ hardparts_df %>%
 ```
 Could we do presence/absence linear regression, hardparts vs. metabarcoding by species detections in the dataset?
 
+```{r hard-parts-by-sample}
+hardparts_df %>%
+  filter(DNASample != "AN011RY") %>%
+  ggplot(aes(x = DNASample, y = hardparts)) +
+  geom_point() +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+
+```
+7 samples don't have Leuroglossus
+
+
 
 Apply Bray-Curtis to metabarcoding replicates, then, assuming everything is similar, use the P/A data for comparison with hardparts.
 ```{r}
@@ -407,16 +422,24 @@ bray_reps <- bray_df %>%
   filter(plate.1 == plate.2) %>% # compare reps a and b
   filter(rep.1 != rep.2) # but no need to compare replicates with themselves
 
-bray_reps %>%
-  ggplot(aes(BrayCurtis_dist)) +
-  geom_histogram()
+bray_no_dups <- bray_reps %>%
+  select(-rep.1, -rep.2) %>%
+  unique() %>%
+  mutate(dissimilar = ifelse(BrayCurtis_dist > 0.5, "yes", "no"))
 
+bray_no_dups %>%
+  filter(dissimilar == "yes") %>%
+  arrange(ablg.1) #%>%
+  #select(ablg.1) %>%
+  #unique()
 ```
 The vast majority of a/b replicates are more similar than dissimilar.
-258 comparisons; 24 > 0.5
+105 unique comparisons; 24 > 0.5; but 13 samples (ABLG) out of 43 ABLG numbers had at least one replicate that was more dissimilar than similar.
 
 ```{r}
-24/258
+24/105
+
+(105-24)/105
 ```
 just under 10% (9.3%)
 
@@ -458,13 +481,16 @@ bray_plates %>%
 
 What about summarizing over all replicates. We assume that detections are true detections.
 ```{r insert-min-read-depth}
+# presence/absence data from read data
+
 min_read_df %>%
   ggplot(aes(taxon_reads)) +
     geom_histogram()
 
 presence_df <- min_read_df %>%
   group_by(ablg) %>%
-  mutate(presence = ifelse(taxon_reads > 10 & prop_taxon > 0.1, "1", "0")) %>%
+  #mutate(presence = ifelse(taxon_reads > 10 & prop_taxon > 0.1, "1", "0")) %>%
+  mutate(presence = ifelse(taxon_reads > 10 & prop_taxon > 0.01, "1", "0")) %>% # 1% proportion of taxon filter
   select(ablg, alternative_ID, source, taxon, presence) %>%
   unique() %>%
   mutate(detection_method = "DNA")
@@ -616,10 +642,52 @@ combo_df %>%
   )  +
   labs(y = "number of samples",
        x = "",
-       title = "Minimum filters: taxa with > 10 reads and >10% of reads in 1 replicate")
+       title = "Minimum filters: taxa with > 10 reads in 1 replicate")
 
 ggsave("pdf_outputs/NFSfecal_DNAhardparts_taxlevel.jpg", width = 10, height = 6)
 
+```
+
+```{r hard-parts-v-metabarcoding-by-sample}
+combo_df %>%
+  ungroup() %>%
+  filter(source != "fecal loop") %>%
+  mutate(presence = ifelse(detection_method == "hardparts", 1, presence)) %>%
+  filter(presence != 0) %>%
+  group_by(alternative_ID, detection_method) %>%
+  tally() %>%
+  pivot_wider(names_from = detection_method, values_from = n) %>%
+  mutate(`dna-hardparts` = DNA-hardparts) 
+
+```
+
+
+```{r multiple-subsamples-for-fecal-loops?}
+combo_df %>%
+  ungroup() %>%
+  filter(presence != 0) %>%
+  filter(detection_method == "DNA") %>%
+  group_by(source, taxon) %>%
+  tally() %>%
+  arrange(-n) %>%
+  mutate(samples = ifelse(source == "scat matrix", 32, 11)) %>%
+  ungroup() %>%
+  group_by(source) %>%
+  mutate(prop = n/samples) %>%
+  mutate(taxon = str_replace(taxon, "_", " ")) %>%
+  ggplot(aes(x = reorder(taxon, -prop), y = prop, fill = source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.98, vjust = 0.5, face = "italic", size = 11),
+    axis.title.y = element_text(margin = margin(r = 5))
+    ) +
+  labs(x = "Prey species",
+       y = "Proportion of samples", 
+       fill = "Sample type",
+       title = "DNA metabarcoding of fecal loops compared to scats, Bogoslof Island")
+
+ggsave("pdf_outputs/Bogo_scats_v_fecal_loops.png", width = 8, height = 4.5)
 ```
 
 
@@ -887,4 +955,32 @@ filtered_df %>%
 
 
 
+```{r data-output-for-MML}
+filtered_df %>%
+  select(ablg, taxon, taxonomic_level, alternative_ID, source, collection_year, collection_month, collection_day, location1, mean_taxon_reads, sample_reads) %>%
+  mutate(taxon_proportion = mean_taxon_reads/sample_reads) %>%
+  write_csv("csv_outputs/NFS_Bogo_fecal_MiFish_data_for_MML.csv")
+
+
+```
+why is the number of sample reads not a round number? Probably because I've removed taxa that have <10 reads and <5% of the reads in a given sample.
+
+
+##############
+
+13 March 2025
+
+Big picture: There are three analyses I want for the NPRB proposal
+
+```{r}
+filtered_df %>%
+  select(alternative_ID, source) %>%
+  unique()
+```
+
+32 scats
+11 fecal loop samples
+
+1) Bray-Curtis of subsamples from a single scat
+2) Bray-Curtis of all scat matrix samples compared to all fecal loop samples
 
