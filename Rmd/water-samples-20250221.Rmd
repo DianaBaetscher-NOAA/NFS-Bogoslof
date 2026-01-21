@@ -1,0 +1,748 @@
+---
+title: "Processing data for water samples from 20250221 MiSeq run"
+output: html_notebook
+---
+
+Processing these data locally for now...
+1. Used cutadapt to remove primers
+2. unzipped files before going to dada2
+
+
+```{r load-libraries}
+library(dada2)
+library(dplyr)
+
+```
+
+```{r}
+# file location
+path <- "/Users/diana.baetscher/git-repos/NFS-Bogoslof/MiSeq_data/trimmed"
+
+```
+
+```{r}
+fnFs <- sort(list.files(path, pattern = "_R1.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern = "_R2.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+
+
+```{r}
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+```
+Read quality... not amazing universally. Probably good to trim somewhat liberally.
+
+
+
+```{r}
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+Initial filtering truncLen failed miserably. We changed it to be super-stringent to see how that affects downstream processing.
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(100,100),
+              maxN=0, maxEE=c(2,4), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE) 
+head(out)
+```
+
+Those filters worked decently for now - keeping a majority of the reads.
+
+```{r}
+# ensure there are no samples without reads
+# as these don't work in the next steps
+out %>%
+  as.data.frame() %>%
+  filter(reads.out <1)
+
+# filter the matrix to retain samples with >0 reads
+```
+### Error rates
+```{r}
+# fwd error rates
+errF <- learnErrors(filtFs, multithread=TRUE)
+
+# reverse error rates
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+# plot the erors
+p1 <- plotErrors(errF, nominalQ=TRUE)
+p2 <- plotErrors(errR, nominalQ=TRUE)
+
+```
+
+### Sample inference
+
+```{r}
+# forwards
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+
+# reverses
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+
+```
+
+Merge paired end reads
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
+
+Make a sequence table
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+
+
+```{r}
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+```
+Let's remove the singletons and off-target sequences
+```{r}
+#seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 168:172]
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 162:182]
+
+```
+
+
+Remove chimeras
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+```
+Calculate frequency of chimeras
+```{r}
+sum(seqtab.nochim)/sum(seqtab2)
+
+```
+
+Track reads through the pipeline
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+Again, a lot of data loss at the merge step.
+
+
+
+## Export files for taxonomy and samples/ASVs
+
+```{r regseqs-asv-output}
+ #make fasta file with ASVs
+    asv_seqs=colnames(seqtab.nochim)
+    for(i in 1:length(asv_seqs))
+    {
+        write.table(paste(">ASV",i, sep=""),file="csv_outputs/NFS_MiFish_ASV_seqtab_nochim_20250221_wider.csv", append=TRUE, col.names = F, row.names = F, quote=F)
+        write.table(paste(asv_seqs[i], sep=""),file="csv_outputs/NFS_MiFish_ASV_seqtab_nochim_20250221_wider.csv", append=TRUE, col.names = F, row.names = F, quote=F)
+    }
+```
+
+That's the input for the FASTA blastn search.
+
+
+Goal: change ASV headers to numbered ASVs that correspond to those output in the FASTA file.
+```{r output-asv-table}
+# Make map between brief names and full sequences
+briefToSeq <- colnames(seqtab.nochim)
+names(briefToSeq) <- paste0("ASV", seq(ncol(seqtab.nochim))) # Seq1, Seq2, ...
+# Make new sequence table with brief names
+st.brief <- seqtab.nochim
+colnames(st.brief) <- names(briefToSeq)
+
+# export the pool seq table with brief names:
+write.csv(st.brief, file="csv_outputs/NFS_MiFish_ASVtable_20250221_wider.csv")
+```
+
+Now move on to the blastn taxonomy search.
+
+
+
+## Taxonomy outputs
+
+I ran blastn on Sedna and then taxonkit locally.
+
+
+```{r taxonomy-files}
+library(tidyverse)
+taxonomy <- read_tsv("../blast_outputs/blastn_taxlineage_NFS_wider.txt", col_names = F) 
+
+head(taxonomy)
+
+tax_df <- taxonomy %>%
+  filter(!str_detect(X16, "environmental")) %>% # get rid of any environmental samples 
+  select(X1, X3, X17) %>% #remove unnecessary columns
+  group_by(X1, X17) %>% # group by the sequence key and the full taxonomy to reduce duplicate entries
+  unique() %>% # doing that reduced the number of entries from 146k to 17k
+  filter(!is.na(X17)) %>%
+  separate(X17, into=c("kingdom", "phylum", "class", "order", "family", "genus", "species"), sep = ";") %>%
+  select(-kingdom) %>%
+  dplyr::rename(ASV = X1, perc_id = X3) %>%
+  filter(!family %in% c("Hominidae", "Bovidae", "Canidae", "Suidae")) # remove these up front.
+
+  
+```
+
+## Taxonomic filtering ##
+
+Using a 1% identity filter!
+
+For species-level matches:
+1. Any ASV that matches only a single species.
+
+
+```{r checking-for-syntax-issues-with-blast-taxonomy-outputs}
+tax_asv_top_perc <- tax_df %>%
+  mutate(species = ifelse(str_detect(species, " sp\\."), NA, species)) %>% 
+  # remove other stuff that isn't on-target or out of range
+  filter(!species %in% c("Oncorhynchus kawamurae", "Ammodytes japonicus", "Sebastes baramenuke", "Sebastes cheni", "Sebastes inermis", "uncultured bacterium", "Hexagrammos otakii", "Clupea harengus")) %>% # remove species outside of their range
+  filter(family != "Phasianidae") %>%
+  group_by(ASV, species) %>%
+  slice_max(perc_id, n = 1)
+  # take the highest perc_id for a single species (taxonomy) entry per ASV
+# this remove entries for a given species/ASV at different percent ids
+  
+single_spp_taxa <-tax_asv_top_perc %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(ASV) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  left_join(., tax_asv_top_perc, by = "ASV") %>%
+  select(-n) %>%
+  mutate(taxon = species, taxonomic_level = "species")
+
+
+```
+61 ASVs have a single species taxonomic match.
+
+
+
+
+```{r organize-taxonomy-for-the-rest-of-the-ASVs}
+# with the multi-species ASVs, rank the species in the top 1% based on identity
+id_ranked_df <- tax_asv_top_perc %>%
+  anti_join(., single_spp_taxa, by = "ASV") %>%
+  group_by(ASV) %>%
+  mutate(id_rank = rank(desc(perc_id), ties.method = "min")) %>% # rank the taxonomic hits per sequence by % id
+  mutate(top_perc = max(perc_id)) %>% # designate the highest % id for the best taxonomic hit in each sequence (in some, but not all cases, this is 100%) 
+  arrange(ASV) %>%
+  mutate(perc_diff = top_perc-perc_id) %>%
+  filter(!perc_diff > 1) # 1% difference #### EDIT THIS FOR THE % DIFFERENCE ####
+  
+```
+
+
+```{r}
+# now determine which ASVs are single-species based on the top 1%
+species_level_asv <- id_ranked_df %>%
+  group_by(ASV, species) %>%
+  tally() %>%
+  group_by(ASV) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  left_join(., id_ranked_df, by = "ASV") %>%
+  select(-n) %>%
+  filter(perc_id == top_perc) %>%
+  filter(!is.na(species)) %>% # remove the sequences without species-level ids
+  mutate(taxon = species, taxonomic_level = "species")
+  
+```
+an additional 23 ASVs that have a single taxonomic identity within the top 1% of blast matches.
+
+
+
+
+```{r non-species-level-matches}
+# genus-level
+  single_genus <- id_ranked_df %>%
+    anti_join(., species_level_asv, by = "ASV") %>% 
+    group_by(ASV, genus) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(ASV) %>%
+    tally(name = "n_genera") %>%
+    filter(n_genera == 1) %>% # sequences that match only a single genus
+    select(-n_genera) %>%
+    left_join(., id_ranked_df) %>%
+    filter(!is.na(genus)) %>% # get rid of sequences that are NA at the genus level
+    mutate(taxonomic_level = "genus") %>%
+    mutate(taxon = genus)
+  
+# single family
+single_family <- id_ranked_df %>%
+    anti_join(., species_level_asv, by = "ASV") %>% 
+    anti_join(., single_genus, by = "ASV") %>%
+    group_by(ASV, family) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(ASV) %>%
+    tally(name = "n_families") %>%
+    filter(n_families == 1) %>% # sequences that match only a single genus
+    select(-n_families) %>%
+    left_join(., id_ranked_df) %>%
+    filter(!is.na(family)) %>% # get rid of sequences that are NA at the genus level
+    mutate(taxonomic_level = "family") %>%
+    mutate(taxon = family)
+
+single_family
+
+# single order
+  single_order <- id_ranked_df %>%
+    anti_join(., species_level_asv, by = "ASV") %>% 
+    anti_join(., single_genus, by = "ASV") %>%
+    anti_join(., single_family, by = "ASV") %>%
+    group_by(ASV, order) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(ASV) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single order
+    select(-n) %>%
+    left_join(., id_ranked_df) %>%
+    filter(!is.na(order)) %>%
+    mutate(taxonomic_level = "order") %>%
+    mutate(taxon = order)
+  
+  # single class
+  single_class <- id_ranked_df %>%
+    anti_join(., species_level_asv, by = "ASV") %>% 
+    anti_join(., single_genus, by = "ASV") %>%
+    anti_join(., single_family, by = "ASV") %>%
+    anti_join(single_order, by = "ASV") %>%
+    group_by(ASV, class) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(ASV) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single class
+    select(-n) %>%
+    left_join(., id_ranked_df) %>%
+    filter(!is.na(class)) %>%
+    mutate(taxonomic_level = "class") %>%
+    mutate(taxon = class)
+  
+  # single phylum
+  single_phylum <- id_ranked_df %>%
+   anti_join(., species_level_asv, by = "ASV") %>% 
+    anti_join(., single_genus, by = "ASV") %>%
+    anti_join(., single_family, by = "ASV") %>%
+    anti_join(single_order, by = "ASV") %>%
+    anti_join(single_class, by = "ASV") %>%
+    group_by(ASV, phylum) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(ASV) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single phylum
+    select(-n) %>%
+    left_join(., id_ranked_df) %>%
+    filter(!is.na(phylum)) %>%
+    mutate(taxonomic_level = "phylum") %>%
+    mutate(taxon = phylum)
+  
+```
+
+```{r combine-taxonomy-dataframes}
+# this dataframe still has multiple taxonomic entries per sequence
+# only by selecting the taxon column can we fully collapse the df
+taxonomy_combined <- bind_rows(single_spp_taxa, species_level_asv, single_genus, single_family, single_order, single_class, single_phylum) %>%
+   mutate(top_perc = ifelse(is.na(top_perc), perc_id, top_perc)) %>%
+    mutate(id_rank = ifelse(is.na(id_rank), 1, id_rank)) %>%
+     mutate(perc_diff = ifelse(is.na(perc_diff), 0, perc_diff))
+
+
+# how many species-level assignments are <98% identity?
+# let's switch those to genus-level IDs
+taxonomy_rank_mult_entries <- taxonomy_combined %>%
+  select(-perc_diff) %>%
+  #filter(id_rank == 1) %>%  # this will make this df smaller, but the assignment is based on the taxon/taxonomic_level, which includes multiple ranks
+  mutate(taxon = ifelse(taxonomic_level == "species" & perc_id < 98, genus, taxon)) %>%
+  mutate(taxonomic_level = ifelse(taxonomic_level == "species" & perc_id < 98, "genus", taxonomic_level)) 
+
+```
+
+
+```{r evaluate-taxon-ids-at-any-level}
+taxonomy_rank_mult_entries %>%
+  select(taxon, taxonomic_level) %>%
+  unique()
+
+```
+330 unique ASV/taxa
+36 unique taxa (excluding ASVs)
+
+
+## what non-fish are here? 
+```{r}
+not_Actinopteri <- taxonomy_rank_mult_entries %>%
+  ungroup() %>%
+  filter(class != "Actinopteri") %>%
+  select(species, genus, family, order, class, phylum) %>%
+  unique() %>%
+  select(species, genus, family, order)
+
+not_Actinopteri
+```
+all of those make sense.
+
+
+```{r integrate-taxonomy}
+multi_hit_asv_df <- taxonomy_rank_mult_entries %>%
+  filter(!is.na(phylum)) %>%
+  group_by(ASV) %>%
+  add_tally(name = "n_taxonomic_hits") %>%
+ # --- STEP 1: extract epithet
+  mutate(epithet = word(species, 2)) %>% 
+
+  # --- STEP 2: compute genus- and family-level combined names
+  group_by(ASV) %>% 
+  mutate(
+    # GENUS-LEVEL: "Genus epithet1/epithet2/epithet3"
+    combined_genus_epithet = if_else(
+      taxonomic_level == "genus" & n_taxonomic_hits < 4,
+      paste0(
+        first(genus), " ",
+        paste(unique(epithet), collapse = "/")
+      ),
+      taxon
+    ),
+
+    # FAMILY-LEVEL: "Genus1/Genus2"
+    combined_family_species = if_else(
+      taxonomic_level == "family" & n_taxonomic_hits < 4,
+      paste(unique(genus), collapse = "/"),
+      NA_character_
+    )
+  ) %>% 
+  ungroup() %>% 
+  
+
+  # --- STEP 3: choose final hit label
+  mutate(
+    hit = case_when(
+      n_taxonomic_hits == 1 ~ taxon,
+      taxonomic_level == "genus"  ~ combined_genus_epithet,
+      taxonomic_level == "family" ~ combined_family_species,
+      TRUE ~ NA_character_
+    )
+  )
+  
+
+```
+
+```{r add-samples}
+samples <- read_csv("csv_outputs/NFS_MiFish_ASVtable_20250221_wider.csv") %>%
+  rename(sample = `...1`)
+
+
+multi_tax_sample_df <- samples %>%
+  pivot_longer(2:length(samples), names_to = "ASV", values_to = "reads") %>%
+  filter(reads > 0) %>%
+  left_join(., multi_hit_asv_df) %>%
+  filter(!is.na(phylum)) %>%
+  mutate(hit = ifelse(is.na(hit), taxon, hit)) %>%
+  select(sample, reads, hit) %>%
+  unique()
+
+
+multi_tax_sample_df
+```
+
+```{r positive-controls}
+multi_tax_sample_df %>%
+  filter(str_detect(sample, "PC")) %>%
+   ggplot(aes(x = sample, y = reads, fill = hit)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  ) 
+```
+
+```{r negative-controls}
+multi_tax_sample_df %>%
+  filter(str_detect(sample, "NC")) %>%
+   ggplot(aes(x = sample, y = reads, fill = hit)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  ) 
+```
+
+```{r presence-of-sturgeon-in-samples}
+multi_tax_sample_df %>%
+  filter(str_detect(hit, "Acipenser")) %>%
+  arrange(desc(reads))
+
+
+```
+In the samples that we're planning on retaining, how many Sturgeon reads?
+
+
+```{r organize-sample-df}
+# filtering steps by read depth, etc.
+multi_tax_sample_df %>%
+  group_by(sample, hit) %>%
+  mutate(spp_reads = sum(reads)) %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(spp_reads)) %>%
+  filter(total_reads > 1000) %>%
+  mutate(prop = spp_reads/total_reads) %>%
+    select(sample, hit, spp_reads, total_reads, prop) %>%
+    unique() %>%
+  separate(sample, into = c("id", "rep"), remove = F) %>%
+  ggplot(aes(x = sample, y = prop, fill = hit)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 90)
+  ) 
+```
+
+
+```{r}
+multi_tax_sample_df %>%
+  group_by(sample, hit) %>%
+  mutate(spp_reads = sum(reads)) %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(spp_reads)) %>%
+  select(sample, total_reads) %>%
+  #filter(total_reads < 20000) %>%
+  mutate(keep = ifelse(total_reads > 1500, "keep", "toss")) %>%
+  ggplot(aes(x = log10(total_reads), fill = keep)) +
+  geom_histogram()
+```
+
+```{r}
+multi_tax_sample_df %>%
+  group_by(sample, hit) %>%
+  mutate(spp_reads = sum(reads)) %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(spp_reads)) %>%
+  ungroup() %>%
+  select(sample, total_reads) %>%
+  unique() %>%
+  summarise(median(total_reads))
+
+```
+The number of reads per replicate is wild. I think I probably end up ditching the low-read depth replicates rather than summing them together.
+
+```{r}
+multi_tax_sample_df %>%
+  group_by(sample, hit) %>%
+  mutate(spp_reads = sum(reads)) %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(spp_reads)) %>%
+  ungroup() %>%
+  select(sample, total_reads) %>%
+  unique() %>%
+  separate(sample, into = c("id", "rep")) %>%
+  ggplot(aes(x = id, y = total_reads, fill = rep)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  ) 
+```
+Given that amount of variation, let's just see what we have using reasonable filters:
+
+```{r}
+samples_to_keep <- multi_tax_sample_df %>%
+  group_by(sample, hit) %>%
+  mutate(spp_reads = sum(reads)) %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(spp_reads)) %>%
+  ungroup() %>%
+  select(sample, total_reads) %>%
+  unique() %>%
+  filter(total_reads > 1000) %>%
+  # remove controls
+  filter(!str_detect(sample, "PC")) %>%
+  filter(!str_detect(sample, "NC"))
+
+```
+168 sample/replicates with >1000 reads
+
+```{r}
+keeper_tax_df <- multi_tax_sample_df %>%
+  inner_join(., samples_to_keep) %>%
+  group_by(sample, hit) %>%
+  mutate(spp_reads = sum(reads)) %>%
+  select(sample, hit, spp_reads) %>% # need this here, otherwise the proportions don't sum to 1
+  unique() %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(spp_reads)) %>%
+  filter(total_reads > 1000) %>%
+  select(sample, hit, spp_reads, total_reads) %>%
+  unique() %>%
+  mutate(prop = spp_reads/total_reads)
+```
+
+```{r how-much-sturgeon-in-keepers}
+keeper_tax_df %>%
+  filter(str_detect(hit, "Acipenser")) %>%
+  ggplot(aes(x = prop)) +
+  geom_histogram()
+
+keeper_tax_df %>%
+  filter(str_detect(hit, "Acipenser")) %>%
+  filter(prop > 0.5)
+
+keeper_tax_df %>%
+  filter(str_detect(hit, "Acipenser")) %>%
+   filter(sample != "e02615-2") %>% # This sample is all sturgeon too.
+  ungroup() %>%
+  summarise(max(prop)) # filter by read depth or proportion?
+# maybe stick with the 56 reads?
+```
+
+
+
+```{r}
+keeper_df <- keeper_tax_df %>%
+  filter(sample != "e02615-2") %>% # This sample is all sturgeon too.
+  filter(spp_reads > 56 & hit != "Acipenser fulvescens") %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(spp_reads)) %>% # recalculate proportions w/o sturgeon
+  mutate(prop = spp_reads/total_reads)
+
+# what does that remove?
+keeper_tax_df %>%
+  filter(sample != "e02615-2") %>% # This sample is all sturgeon too.
+  filter(spp_reads < 56)
+```
+
+
+```{r plot-filtered-data}
+keeper_df %>%
+  ggplot(aes(x = sample, y = prop, fill = hit)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90)
+  ) +
+  scale_y_continuous(expand = c(0,0))
+
+ggsave("pdf_outputs/eDNA_quicklook_20260120.png", height = 10, width = 15)
+```
+
+
+Next steps:
+1. Sum across replicates for a given sample
+2. Add in metadata
+
+```{r add-meta-data}
+meta <- read_csv("../data/Bogoslof_full_metadata.csv")
+
+```
+
+```{r organize-eDNA-data-to-join}
+slim_df <- keeper_df %>%
+  ungroup() %>%
+  separate(sample, into = c("extraction_ID", "rep"), remove = F) %>%
+  select(-sample, -rep, -spp_reads) %>%
+  rename(taxa = hit) %>% 
+  # take the mean proportion of reads by taxon across replicates
+  group_by(extraction_ID, taxa) %>%
+  summarise(mean_prop = mean(prop))
+```
+
+```{r}
+slim_df %>%
+  filter(sum(mean_prop) > 1) %>%
+  ggplot(aes(x = extraction_ID, y = mean_prop, fill = taxa)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90)
+  ) +
+  scale_y_continuous(expand = c(0,0))
+
+
+```
+
+```{r}
+# to deal with the mismatch between species comps in different replicates, I needed to do this a bit differently.
+# but for species that ARE found in multiple reps, I need to still take the mean of those?
+ slim_df <- keeper_df %>%
+  ungroup() %>%
+  separate(sample, into = c("extraction_ID", "rep"), remove = F) %>%
+  rename(taxa = hit) %>% 
+  # take the mean proportion of reads by taxon across replicates
+  group_by(extraction_ID, taxa) %>%
+  summarise(taxa_prop = mean(prop)) %>% # get rid of duplicate entries for spp in multiple replicates
+  ungroup() %>%
+  group_by(extraction_ID) %>%
+  mutate(new_tot_prop = sum(taxa_prop)) %>%
+  mutate(new_prop = taxa_prop/new_tot_prop) 
+   
+  
+  
+  slim_df %>% 
+  ggplot(aes(x = extraction_ID, y = new_prop, fill = taxa)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90)
+  ) +
+  scale_y_continuous(expand = c(0,0))
+
+ 
+```
+
+
+
+
+```{r combine}
+combined_meta_w_edna <- meta %>%
+  left_join(., slim_df) %>%
+  rename(proportion_sequencing_reads = new_prop) %>%
+  select(-taxa_prop, -new_tot_prop)
+
+```
+
+
+```{r}
+combined_meta_w_edna %>%
+  ggplot(aes(x = extraction_ID, y = proportion_sequencing_reads, fill = taxa)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90)
+  ) +
+  scale_y_continuous(expand = c(0,0))
+
+ggsave("pdf_outputs/eDNA_by_filter.png", height = 10, width = 15)
+```
+
+the other way to provide these data to MML is by station, i.e., summing across the three filters at a given station.
+
+```{r}
+combined_meta_w_edna %>%
+  write_csv("csv_outputs/Bogoslof_eDNA_w_metadata_20260121.csv")
+
+# single list per sampling location:
+combined_meta_w_edna %>%
+  select(-proportion_sequencing_reads) %>%
+  group_by(Transect, StationKM) %>%
+  mutate()
+
+```
+
