@@ -109,7 +109,6 @@ p2
 # forwards
 dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
 
-
 # reverses
 dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
 

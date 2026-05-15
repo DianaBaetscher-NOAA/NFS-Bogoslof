@@ -232,7 +232,6 @@ combined_df_noNA %>%
 
 
 ```{r filter-controls-analyze-samples}
-
 clean_df_filtered <- combined_df_noNA %>%
   left_join(., sample_metadata, by = c("ablg" = "extraction_ID")) %>%
   filter(sample_type == "sample") %>%
