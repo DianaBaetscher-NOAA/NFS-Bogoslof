@@ -329,6 +329,72 @@ sample_df %>%
   summarise(taxon_reads = sum(reads)) 
 ```
 
+Out of curiosity, when we see Gadidae, do we always see at least a genus-level ID in the same sample?
+Yes, and it only occurs in one sample.
+
+```{r}
+clean_df %>%
+  group_by(ablg, taxon) %>%
+  summarise(sample_reads = sum(taxon_reads)) %>%
+  filter(taxon == "Gadidae")
+
+```
+
+
+### read in data from hard parts
+(from Katie Luxa and Tonya Zeppelin at MML)
+
+
+```{r hard-parts-data}
+hardparts <- readxl::read_xlsx("../data/2023 NFS Bogoslof hard parts.xlsx")
+
+# just keep the fishes 
+# i.e., remove squids
+hardparts_df <- hardparts %>%
+  # select(ScientificName) %>%
+  # unique() %>%
+  filter(!ScientificName %in% c("Gonatidae", "Gonatopsis borealis/Berryteuthis magister", "Gonatus sp.", "NO PREY REMAINS", "Decapodiformes")) %>%
+  rename(hardparts = ScientificName) %>%
+  mutate(hardparts = ifelse(hardparts == "Northern lampfish", "Stenobrachius leucopsaurus", hardparts))
+
+```
+9 species of fishes.
+
+```{r join-the-DNA-sample-id-with-the-ablg}
+clean_df  %>%
+  group_by(ablg, taxon, alternative_ID) %>%
+  summarise(mean_reads = mean(taxon_reads)) %>%
+  select(ablg, alternative_ID, taxon, mean_reads) %>%
+  mutate(mean_reads = round(mean_reads, digits = 0)) %>%
+  write_csv("Bogoslof_fecal_samples_wo_eelgrass_spp.csv")
+
+```
+
+```{r}
+clean_df  %>%
+  group_by(ablg, taxon, alternative_ID) %>%
+  summarise(mean_reads = mean(taxon_reads)) %>%
+  select(ablg, alternative_ID, taxon, mean_reads) %>%
+  mutate(mean_reads = round(mean_reads, digits = 0)) %>%
+  #filter(taxon != "Gadidae") %>%
+  filter(str_detect(taxon, "Oncorhynchus")) %>%
+  filter(mean_reads > 100) %>%
+  ggplot(aes(x = alternative_ID, y = mean_reads, fill = reorder(taxon, -mean_reads))) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+   theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95, vjust = 0.5),
+    #legend.position = "bottom"
+  ) +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(fill = "",
+       y = "mean reads",
+       x = "sample",
+       title = "Oncorhynchus spp. >100 reads")
+  
+ggsave("pdf_outputs/salmon_in_fecal_samples_100_reads.png", height = 4, width = 7)
+```
+
 
 
 
