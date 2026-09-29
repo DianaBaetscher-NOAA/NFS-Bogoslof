@@ -1111,5 +1111,54 @@ filtered_fecal_dataset %>%
 ```{r output-for-tonya}
 filtered_fecal_dataset %>%
   write_csv("csv_outputs/NFS_filtered_fecal_dataset_2023_rerun.csv")
+
+
+```
+
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+df <- read_csv("csv_outputs/NFS_filtered_fecal_dataset_2023_rerun.csv")
+```
+```{r}
+palette_14 <- c(
+  "#E69F00",  # orange
+  "#56B4E9",  # sky blue
+  "#009E73",  # bluish green
+  "#F0E442",  # yellow
+  "#0072B2",  # blue
+  "#D55E00",  # vermillion
+  "#CC79A7",  # reddish purple
+  "#000000",  # black
+  "#999999",  # gray
+  "#882255",  # wine
+  "#44AA99",  # teal
+  "#DDCC77",  # sand
+  "#117733",  # dark green
+  "#332288"   # indigo
+)
+```
+
+
+
+```{r}
+df %>%
+  # group_by(alternative_ID, taxon) %>%
+  # mutate(prop_sample_reads = mean(taxon_reads)) %>%
+  ggplot(aes(x = alternative_ID, y = taxon_reads, fill = reorder(taxon, -taxon_reads))) +
+  geom_bar(stat = "identity")  +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = .95, size = 7)
+  ) +
+  facet_grid(rows = vars(plate_replicate), cols = vars(extraction_replicate), scales = "free", space = "free") +
+  scale_fill_manual(values = palette_14) +
+  labs(fill = "prey species",
+       x = "sample",
+       y = "sequencing reads")
+  
 ```
 
